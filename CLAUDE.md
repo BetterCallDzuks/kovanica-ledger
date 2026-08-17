@@ -61,7 +61,7 @@ crates/
       block.rs                 Block (multi-parent vertex) and BlockId (BLAKE3 hash)
       dag.rs                   Dag store: insert/validate, past sets, tips, GhostdagData, chain_key
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
-      ordering.rs              linearize() (deterministic topological order), selected_tip/selected_chain
+      ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
@@ -89,9 +89,13 @@ Update this tree when you add them.
   queries but O(n²) memory. Production replaces this with a reachability oracle
   (interval labels). See `dag.rs` module docs.
 - **In-memory only** — no persistence layer yet.
-- **Linearization** is a deterministic topological sort keyed by the GHOSTDAG chain
-  key (blue work, blue score, id). It is a valid total order in the GHOSTDAG spirit,
-  not a bit-for-bit reproduction of Kaspa's mergeset ordering.
+- **Linearization** is the recursive GHOSTDAG order:
+  `order(B) = order(selected_parent(B)) ++ mergeset_order(B) ++ [B]`, unrolled over
+  the selected chain and closed with the selected tip's anticone (the virtual
+  block's mergeset). The selected chain is a subsequence and each merged block
+  sits directly before its merger. Mergeset order within a block is a deterministic
+  topological sort by `(|past|, id)` — a valid GHOSTDAG-spirit order, not Kaspa's
+  exact blue-work mergeset tiebreak. See `ordering.rs` module docs.
 - **State (`kovanica-state`)** applies transactions block-by-block over `linearize()`.
   A subsidy is a single per-block constant (no halving schedule); coinbase maturity
   is only "not spendable in the same block"; there are no tx size/weight limits and
@@ -164,8 +168,10 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
 - [~] Block-level validation at insert time: context-free structural validation done
       (`BlockValidator` hook + `TxStructureValidator`); stateful (UTXO-aware) validation
       at insert still TODO — it needs per-block UTXO state (below).
-- [ ] Per-block UTXO state (selected-parent UTXO set + mergeset diffs) to enable
-      stateful validation at insert and incremental re-orgs.
+- [x] Recursive GHOSTDAG linearization (`order(B) = order(sp) ++ mergeset ++ [B]`),
+      the ordering per-block UTXO state composes along.
+- [ ] Per-block UTXO state (selected-parent UTXO set + mergeset diffs) built along
+      the recursive order, to enable stateful validation at insert and incremental re-orgs.
 - [ ] Reachability oracle to replace full per-block `past` sets.
 - [ ] Persistence (an on-disk store) for the DAG and consensus data.
 - [ ] p2p networking / gossip and a runnable node binary with RPC.

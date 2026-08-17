@@ -329,6 +329,73 @@ fn colouring_check_b_reds_candidate_against_saturated_blue() {
     assert!(!gd_b.mergeset_blues.contains(&c));
 }
 
+/// Index of `id` within `order` (panics if absent).
+fn position(order: &[BlockId], id: BlockId) -> usize {
+    order.iter().position(|b| *b == id).expect("block in order")
+}
+
+/// Assert the selected chain appears as a subsequence of the linearization:
+/// its blocks occur in chain order (they need not be contiguous).
+fn assert_selected_chain_is_subsequence(dag: &Dag) {
+    let order = dag.linearize();
+    let positions: Vec<usize> = dag
+        .selected_chain()
+        .iter()
+        .map(|b| position(&order, *b))
+        .collect();
+    assert!(
+        positions.windows(2).all(|w| w[0] < w[1]),
+        "selected chain must appear in order within the linearization: {positions:?}"
+    );
+}
+
+#[test]
+fn recursive_order_lays_selected_chain_before_side_blocks() {
+    // genesis → a → p is the heavier (blue_score 2) chain; b hangs off genesis
+    // as a side block (blue_score 1). The selected tip is p, so the recursive
+    // order emits the whole selected chain [genesis, a, p] first and only then
+    // the side block b — unlike a global priority sort, which would place b
+    // right after genesis. Pins order(B) = order(sp) ++ mergeset ++ [B].
+    let (mut dag, genesis) = new_dag(3);
+    let a = add(&mut dag, &[genesis], "a");
+    let p = add(&mut dag, &[a], "p");
+    let b = add(&mut dag, &[genesis], "b");
+
+    assert_eq!(dag.selected_tip(), p);
+    assert_eq!(dag.linearize(), vec![genesis, a, p, b]);
+    assert_topological(&dag, &dag.linearize());
+}
+
+#[test]
+fn recursive_order_places_mergeset_directly_before_its_merger() {
+    // A diamond: a and b are parallel off genesis, m merges both. m's selected
+    // parent is one of {a, b}; the other is m's mergeset and must be emitted
+    // immediately before m (after the selected parent), i.e. order is
+    // [genesis, selected_parent, merged, m].
+    let (mut dag, genesis) = new_dag(3);
+    let a = add(&mut dag, &[genesis], "a");
+    let b = add(&mut dag, &[genesis], "b");
+    let m = add(&mut dag, &[a, b], "m");
+
+    let sp = dag.ghostdag(&m).unwrap().selected_parent.unwrap();
+    let merged = if sp == a { b } else { a };
+    assert_eq!(dag.linearize(), vec![genesis, sp, merged, m]);
+}
+
+#[test]
+fn selected_chain_is_a_subsequence_on_a_wide_fork() {
+    // On an adversarial wide fork (many parallel blocks then a merge), the
+    // selected chain must still be a subsequence of the linearization.
+    let (mut dag, genesis) = new_dag(2);
+    let parallel: Vec<BlockId> = (0..6)
+        .map(|i| add(&mut dag, &[genesis], &format!("w{i}")))
+        .collect();
+    let _m = add(&mut dag, &parallel, "merge");
+
+    assert_selected_chain_is_subsequence(&dag);
+    assert_topological(&dag, &dag.linearize());
+}
+
 #[test]
 fn installed_validator_rejects_blocks_at_insert() {
     // A validator that rejects any block whose payload does not start with b'k'.
