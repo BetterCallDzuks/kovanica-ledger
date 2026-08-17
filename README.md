@@ -5,9 +5,10 @@ parents so they can be produced in parallel and merged, rather than forming a
 single linear chain. Consensus follows **GHOSTDAG** (the PHANTOM/GHOSTDAG
 protocol behind Kaspa).
 
-> Early stage. The block DAG and the GHOSTDAG consensus core are implemented and
-> tested; higher layers (state, networking, node) are not built yet. See
-> [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and roadmap.
+> Early stage. The block DAG + GHOSTDAG consensus core and a UTXO ledger applied
+> in GHOSTDAG order are implemented and tested; networking and a node binary are
+> not built yet. See [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and
+> roadmap.
 
 ## What's here
 
@@ -19,6 +20,17 @@ protocol behind Kaspa).
 - **Linearization**: a deterministic total order over the whole DAG, plus the
   selected (heaviest) chain.
 
+`crates/kovanica-state` — the UTXO ledger:
+
+- **Transactions** in the UTXO model (inputs spend previous outputs; coinbase
+  transactions mint), with a canonical encoding that doubles as a block payload.
+- **Ed25519 spend authorisation**: each input is signed; spends verify against the
+  spent output's owner.
+- **State transition**: transactions are applied in the DAG's GHOSTDAG-linearized
+  order, so a double-spend split across parallel blocks is resolved
+  deterministically — the block that wins the linearization spends the output;
+  the loser is rejected.
+
 ## Build & test
 
 ```sh
@@ -27,7 +39,7 @@ cargo test            # unit + integration + doctests
 cargo clippy --all-targets
 ```
 
-## Example
+## Example — consensus (`kovanica-dag`)
 
 ```rust
 use kovanica_dag::{Block, Dag};
@@ -42,6 +54,32 @@ let c = dag.insert(Block::new(vec![a, b], 1, b"c".to_vec())).unwrap();
 
 assert_eq!(dag.ghostdag(&c).unwrap().blue_score, 3); // genesis + a + b
 let order = dag.linearize();                          // deterministic total order
+```
+
+## Example — ledger (`kovanica-state`)
+
+Blocks carry transactions; consensus orders them; the ledger applies them.
+
+```rust
+use kovanica_dag::{Block, Dag};
+use kovanica_state::{apply_dag, encode_block_payload, KeyPair, OutPoint, Transaction, TxOutput};
+
+let miner = KeyPair::from_u64(1);
+let alice = KeyPair::from_u64(2);
+
+// Genesis coinbase mints 100 to the miner.
+let coinbase = Transaction::coinbase(vec![TxOutput::new(100, miner.address())], b"genesis".to_vec());
+let coin = OutPoint::new(coinbase.id(), 0);
+let genesis = Block::genesis(1, encode_block_payload(&[coinbase]));
+let genesis_id = genesis.id();
+let mut dag = Dag::new(3, genesis);
+
+// The miner sends 100 to Alice, spending the coinbase output.
+let pay = Transaction::signed(&[(coin, &miner)], vec![TxOutput::new(100, alice.address())], vec![]);
+dag.insert(Block::new(vec![genesis_id], 1, encode_block_payload(&[pay]))).unwrap();
+
+let run = apply_dag(&dag, 100); // subsidy = 100 per block
+assert_eq!(run.utxo.balance(&alice.address()), 100);
 ```
 
 ## License
