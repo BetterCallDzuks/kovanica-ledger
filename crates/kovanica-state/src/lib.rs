@@ -18,6 +18,10 @@
 //!   [`kovanica_dag::Dag`] and apply every block's transactions in that order,
 //!   so conflicting spends across parallel blocks are resolved deterministically
 //!   by GHOSTDAG.
+//! * [`validate_block_payload`] / [`TxStructureValidator`] — context-free
+//!   structural validation of a block's transactions, installable on a
+//!   [`kovanica_dag::Dag`] so malformed blocks are rejected *at insert time*
+//!   (see [`validation`]). Stateful rules stay in [`apply_block`].
 //!
 //! ## Quick tour
 //!
@@ -62,6 +66,7 @@ pub mod keys;
 pub mod ledger;
 pub mod tx;
 pub mod utxo;
+pub mod validation;
 
 pub use keys::{verify, Address, KeyPair};
 pub use ledger::{apply_block, apply_dag, BlockSummary, LedgerError, LedgerRun};
@@ -70,3 +75,4 @@ pub use tx::{
     TxInput, TxOutput,
 };
 pub use utxo::UtxoSet;
+pub use validation::{validate_block_payload, BlockValidationError, TxStructureValidator};

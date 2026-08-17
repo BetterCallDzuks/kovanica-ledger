@@ -16,6 +16,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::block::{Block, BlockId};
+use crate::validation::BlockValidator;
 
 /// Errors returned when inserting a block into the [`Dag`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +29,8 @@ pub enum DagError {
     NoParents(BlockId),
     /// `insert_genesis` was called on a DAG that already has a genesis.
     GenesisAlreadySet,
+    /// The installed [`BlockValidator`] rejected the block, with its reason.
+    InvalidBlock { id: BlockId, reason: String },
 }
 
 impl core::fmt::Display for DagError {
@@ -37,6 +40,9 @@ impl core::fmt::Display for DagError {
             DagError::MissingParent(id) => write!(f, "missing parent {id}"),
             DagError::NoParents(id) => write!(f, "non-genesis block {id} has no parents"),
             DagError::GenesisAlreadySet => write!(f, "genesis already set"),
+            DagError::InvalidBlock { id, reason } => {
+                write!(f, "block {id} rejected by validator: {reason}")
+            }
         }
     }
 }
@@ -91,6 +97,9 @@ pub struct Dag {
     pub(crate) nodes: HashMap<BlockId, Node>,
     /// Blocks with no children yet — the current tips.
     tips: BTreeSet<BlockId>,
+    /// Optional payload-aware validator run on each [`Dag::insert`]. See
+    /// [`crate::validation`].
+    validator: Option<Box<dyn BlockValidator>>,
 }
 
 impl Dag {
@@ -121,7 +130,22 @@ impl Dag {
             genesis: genesis_id,
             nodes,
             tips,
+            validator: None,
         }
+    }
+
+    /// Create a DAG as [`Dag::new`] but with a [`BlockValidator`] installed, so
+    /// every subsequent [`Dag::insert`] must pass `validator`. The genesis block
+    /// itself is not validated.
+    pub fn with_validator(k: KParam, genesis: Block, validator: Box<dyn BlockValidator>) -> Self {
+        let mut dag = Self::new(k, genesis);
+        dag.validator = Some(validator);
+        dag
+    }
+
+    /// Install (or replace) the block validator run on every [`Dag::insert`].
+    pub fn set_validator(&mut self, validator: Box<dyn BlockValidator>) {
+        self.validator = Some(validator);
     }
 
     /// The GHOSTDAG `k` parameter.
@@ -189,8 +213,10 @@ impl Dag {
 
     /// Insert `block`, validating and colouring it. Returns its id.
     ///
-    /// Fails if the block is a duplicate, references a missing parent, or (for a
-    /// non-genesis block) references no parents.
+    /// Fails if the block is a duplicate, references a missing parent, (for a
+    /// non-genesis block) references no parents, or is rejected by the installed
+    /// [`BlockValidator`] (if any). The structural DAG checks run first, so a
+    /// validator only ever sees a block whose parents are present.
     pub fn insert(&mut self, block: Block) -> Result<BlockId, DagError> {
         let id = block.id();
         if self.nodes.contains_key(&id) {
@@ -203,6 +229,14 @@ impl Dag {
             if !self.nodes.contains_key(parent) {
                 return Err(DagError::MissingParent(*parent));
             }
+        }
+
+        // Payload-aware validation, before the block is added to the DAG. Both
+        // borrows of `self` here are shared, which the borrow checker allows.
+        if let Some(validator) = self.validator.as_deref() {
+            validator
+                .validate(&block, self)
+                .map_err(|reason| DagError::InvalidBlock { id, reason })?;
         }
 
         // Past = union over parents of ({parent} ∪ past(parent)).
