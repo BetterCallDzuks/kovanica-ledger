@@ -4,18 +4,37 @@
 //! ledger you still need a single, agreed **total order** over every block, so
 //! that (in a full system) transactions can be applied deterministically.
 //!
-//! [`Dag::linearize`] produces that order as a deterministic topological sort:
-//! repeatedly emit the highest-priority block all of whose parents are already
-//! emitted, where priority is the GHOSTDAG chain key — heavier blue work first,
-//! then higher blue score, then smaller id. Because the rule is a pure function
-//! of the DAG, every node derives the identical sequence, and because it only
-//! emits a block after its parents it is always a valid topological order.
+//! [`Dag::linearize`] produces the **recursive GHOSTDAG order** (the ordering
+//! GHOSTDAG/Kaspa define): the order of a block `B` is the order of its selected
+//! parent, followed by `B`'s **mergeset** in a deterministic topological order,
+//! followed by `B` itself —
+//!
+//! ```text
+//! order(B) = order(selected_parent(B)) ++ mergeset_order(B) ++ [B]
+//! ```
+//!
+//! Applied to the whole DAG this means: walk the selected chain from genesis to
+//! the selected tip, and before each chain block emit the blocks it merged in
+//! (its mergeset) that are not already on the chain; then append the blocks that
+//! hang off the *other* tips (the selected tip's own anticone), i.e. the
+//! mergeset of the "virtual" block whose parents are all current tips. The
+//! selected chain therefore appears as a subsequence, each merged block sits
+//! directly before the chain block that first merged it, and the tail holds the
+//! side blocks not under the selected tip.
+//!
+//! This differs from a plain priority topological sort: the selected chain and
+//! everything it merges is laid down first, in selected-parent recursion order,
+//! rather than interleaving side blocks by global priority. That is what lets a
+//! per-block UTXO state be built incrementally from its selected parent's state
+//! (a later slice). The order is a pure function of the DAG — mergesets and the
+//! selected chain are — so every node derives the identical sequence, and
+//! because a block is only emitted after all of its parents it is always a valid
+//! topological order.
 //!
 //! [`Dag::selected_tip`] and [`Dag::selected_chain`] expose the GHOSTDAG
-//! backbone (the heaviest chain) that this order is built around.
+//! backbone (the heaviest chain) the order is built around.
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashSet;
 
 use crate::block::BlockId;
 use crate::dag::Dag;
@@ -44,35 +63,35 @@ impl Dag {
         chain
     }
 
-    /// A deterministic total order over every block in the DAG.
+    /// A deterministic total order over every block in the DAG: the recursive
+    /// GHOSTDAG order (see the module docs).
     ///
     /// The result is a topological sort (every block appears after all its
-    /// parents) and is identical on any node holding the same DAG.
+    /// parents), contains the selected chain as a subsequence, and is identical
+    /// on any node holding the same DAG.
     pub fn linearize(&self) -> Vec<BlockId> {
-        // Kahn's algorithm with a priority queue. `remaining` counts each
-        // block's not-yet-emitted parents; a block becomes ready at zero.
-        let mut remaining: HashMap<BlockId, usize> = HashMap::with_capacity(self.nodes.len());
-        let mut ready: BinaryHeap<PriorityKey> = BinaryHeap::new();
-
-        for (id, node) in &self.nodes {
-            let pending = node.block.parents().len();
-            remaining.insert(*id, pending);
-            if pending == 0 {
-                ready.push(self.priority_key(id));
-            }
-        }
-
         let mut order = Vec::with_capacity(self.nodes.len());
-        while let Some(PriorityKey { id, .. }) = ready.pop() {
-            order.push(id);
-            for child in &self.nodes[&id].children {
-                let slot = remaining.get_mut(child).unwrap();
-                *slot -= 1;
-                if *slot == 0 {
-                    ready.push(self.priority_key(child));
-                }
-            }
+
+        // Spine: walk the selected chain, emitting each chain block's mergeset
+        // (in mergeset order) immediately before the chain block itself. This is
+        // exactly order(selected_tip) unrolled from the recursion.
+        for block in self.selected_chain() {
+            order.extend(self.mergeset_order(&block));
+            order.push(block);
         }
+
+        // Tail: the selected tip's anticone — every block not yet emitted (not in
+        // the selected tip's past nor the tip itself). This is the mergeset of
+        // the virtual block over all tips; order it topologically for determinism.
+        let emitted: HashSet<BlockId> = order.iter().copied().collect();
+        let mut tail: Vec<BlockId> = self
+            .nodes
+            .keys()
+            .copied()
+            .filter(|b| !emitted.contains(b))
+            .collect();
+        tail.sort_by_key(|b| self.topo_key(b));
+        order.extend(tail);
 
         debug_assert_eq!(
             order.len(),
@@ -82,40 +101,33 @@ impl Dag {
         order
     }
 
-    fn priority_key(&self, id: &BlockId) -> PriorityKey {
-        let (blue_work, blue_score, _) = self.chain_key(id);
-        PriorityKey {
-            blue_work,
-            blue_score,
-            id: *id,
-        }
+    /// A block's mergeset — the blocks it merged in that its selected parent did
+    /// not already capture — in deterministic topological order.
+    ///
+    /// `mergeset(B) = past(B) \ (past(selected_parent(B)) ∪ {selected_parent(B)})`.
+    /// Empty for genesis. Ordered by [`Dag::topo_key`], which places every strict
+    /// ancestor before its descendants and is otherwise a deterministic tiebreak,
+    /// matching the mergeset order used when the block was coloured.
+    fn mergeset_order(&self, block: &BlockId) -> Vec<BlockId> {
+        let node = &self.nodes[block];
+        let Some(selected_parent) = node.ghostdag.selected_parent else {
+            return Vec::new(); // genesis merges nothing
+        };
+        let sp_past = &self.nodes[&selected_parent].past;
+        let mut mergeset: Vec<BlockId> = node
+            .past
+            .iter()
+            .copied()
+            .filter(|b| *b != selected_parent && !sp_past.contains(b))
+            .collect();
+        mergeset.sort_by_key(|b| self.topo_key(b));
+        mergeset
     }
-}
 
-/// Max-heap ordering key: heavier blue work first, then higher blue score, then
-/// smaller id (via `Reverse`) so the whole order is deterministic.
-struct PriorityKey {
-    blue_work: u128,
-    blue_score: u64,
-    id: BlockId,
-}
-
-impl PartialEq for PriorityKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
-}
-impl Eq for PriorityKey {}
-impl PartialOrd for PriorityKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for PriorityKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.blue_work
-            .cmp(&other.blue_work)
-            .then(self.blue_score.cmp(&other.blue_score))
-            .then(Reverse(self.id).cmp(&Reverse(other.id)))
+    /// Topological sort key: `(|past|, id)`. A strict ancestor has a strictly
+    /// smaller past, so this always orders ancestors before descendants, with the
+    /// id as a deterministic final tiebreak.
+    fn topo_key(&self, id: &BlockId) -> (usize, BlockId) {
+        (self.nodes[id].past.len(), *id)
     }
 }
