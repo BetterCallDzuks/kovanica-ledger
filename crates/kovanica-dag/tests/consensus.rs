@@ -16,8 +16,17 @@ fn new_dag(k: u16) -> (Dag, BlockId) {
 
 /// Insert a unit-work block with the given parents and label.
 fn add(dag: &mut Dag, parents: &[BlockId], label: &str) -> BlockId {
-    dag.insert(Block::new(parents.to_vec(), 1, label.as_bytes().to_vec()))
-        .expect("insert should succeed")
+    add_w(dag, parents, 1, label)
+}
+
+/// Insert a block with an explicit `work` weight.
+fn add_w(dag: &mut Dag, parents: &[BlockId], work: u128, label: &str) -> BlockId {
+    dag.insert(Block::new(
+        parents.to_vec(),
+        work,
+        label.as_bytes().to_vec(),
+    ))
+    .expect("insert should succeed")
 }
 
 /// Assert `order` is a valid topological order of `dag`: every block appears
@@ -221,4 +230,101 @@ fn insert_validations() {
     assert!(dag.insert(Block::new(vec![], 1, b"y".to_vec())).is_err());
     // Sanity: the one good block is a tip.
     assert_eq!(dag.tips(), vec![a]);
+}
+
+#[test]
+fn heavier_work_chain_wins_over_longer_light_chain() {
+    // blue_work (not blue_score) is the primary chain-selection key. A short,
+    // heavy branch must beat a longer branch that has more blocks but less work.
+    // With unit work everywhere the two keys move together, so this is the test
+    // that actually pins blue_work — and that the fold includes work(sp).
+    let (mut dag, genesis) = new_dag(3); // genesis work = 1
+    let x1 = add_w(&mut dag, &[genesis], 100, "x1");
+    let x2 = add_w(&mut dag, &[x1], 1, "x2");
+    let y1 = add_w(&mut dag, &[genesis], 1, "y1");
+    let y2 = add_w(&mut dag, &[y1], 1, "y2");
+    let y3 = add_w(&mut dag, &[y2], 1, "y3");
+
+    // x2: fewer blue blocks but heavier blue work (genesis 1 + x1 100).
+    assert_eq!(dag.ghostdag(&x2).unwrap().blue_score, 2);
+    assert_eq!(dag.ghostdag(&x2).unwrap().blue_work, 101);
+    // y3: more blue blocks (genesis + y1 + y2) but lighter total work.
+    assert_eq!(dag.ghostdag(&y3).unwrap().blue_score, 3);
+    assert_eq!(dag.ghostdag(&y3).unwrap().blue_work, 3);
+
+    // Heavier blue work wins even though its chain is shorter.
+    assert_eq!(dag.selected_tip(), x2);
+    assert_eq!(dag.selected_chain(), vec![genesis, x1, x2]);
+}
+
+#[test]
+fn blue_anticone_sizes_are_exact() {
+    // Two parallel blocks merged: each is in the other's anticone, so within the
+    // merge's blue set each records a blue anticone size of exactly 1, and
+    // genesis (an ancestor of both) records 0. Pins the seed + increment logic
+    // beyond the "<= k" invariant.
+    let (mut dag, genesis) = new_dag(3);
+    let p = add(&mut dag, &[genesis], "p");
+    let q = add(&mut dag, &[genesis], "q");
+    let m = add(&mut dag, &[p, q], "m");
+
+    let sizes = &dag.ghostdag(&m).unwrap().blue_anticone_sizes;
+    assert_eq!(sizes.len(), 3);
+    assert_eq!(sizes[&genesis], 0);
+    assert_eq!(sizes[&p], 1);
+    assert_eq!(sizes[&q], 1);
+}
+
+#[test]
+fn selected_parent_tiebreak_is_by_id() {
+    // Two parallel blocks with equal blue work and score: the larger id wins
+    // the selected-parent tiebreak. Pins the deterministic tiebreak direction.
+    let (mut dag, genesis) = new_dag(3);
+    let a = add(&mut dag, &[genesis], "a");
+    let b = add(&mut dag, &[genesis], "b");
+    let m = add(&mut dag, &[a, b], "m");
+
+    let expected = a.max(b);
+    assert_eq!(dag.ghostdag(&m).unwrap().selected_parent.unwrap(), expected);
+}
+
+#[test]
+fn colouring_check_b_reds_candidate_against_saturated_blue() {
+    // Isolates GHOSTDAG colouring check (b): a candidate is reddened because an
+    // *already-blue* block in its anticone is saturated at k, even though the
+    // candidate's own anticone-blue count is within k (so check (a) passes).
+    //
+    // Build three mutually-parallel blocks off genesis and merge them under
+    // k = 2, so each of the three records a blue anticone size of exactly 2 = k.
+    let k = 2u16;
+    let (mut dag, genesis) = new_dag(k);
+    let x = add(&mut dag, &[genesis], "x");
+    let y = add(&mut dag, &[genesis], "y");
+    let z = add(&mut dag, &[genesis], "z");
+    let u = add(&mut dag, &[x, y, z], "u");
+
+    let u_sizes = &dag.ghostdag(&u).unwrap().blue_anticone_sizes;
+    for id in [x, y, z] {
+        assert_eq!(u_sizes[&id], k, "each parallel block is saturated at k");
+    }
+
+    // C merges y and z (so x stays in C's anticone, saturated), then B merges u
+    // and C. When B colours C, C's anticone within B's blue set is {x, u}:
+    // count 2 = k, so check (a) passes — yet x is saturated, so check (b) reds C.
+    let c = add(&mut dag, &[y, z], "c");
+    let b = add(&mut dag, &[u, c], "b");
+    let gd_b = dag.ghostdag(&b).unwrap();
+
+    let anticone_blues = gd_b
+        .blue_anticone_sizes
+        .keys()
+        .filter(|blue| dag.in_anticone(blue, &c))
+        .count();
+    assert_eq!(
+        anticone_blues,
+        usize::from(k),
+        "check (a) would have passed"
+    );
+    assert!(gd_b.mergeset_reds.contains(&c), "check (b) must red C");
+    assert!(!gd_b.mergeset_blues.contains(&c));
 }
