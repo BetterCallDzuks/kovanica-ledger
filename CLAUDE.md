@@ -2,11 +2,13 @@
 
 Guidance for AI assistants (and humans) working in the **kovanica-ledger** repository.
 
-> **Status: early implementation.** The first vertical slice — the block DAG and
-> the GHOSTDAG consensus core — exists, builds, and is tested (`crates/kovanica-dag`).
-> Layers above it (networking, mempool, UTXO/state, node binary, RPC) do not exist
-> yet and are marked **TODO** below. Keep this file in sync with the code: update
-> it in the same change that adds or moves the structure it describes.
+> **Status: early implementation.** Two vertical slices exist, build, and are
+> tested: the block DAG and GHOSTDAG consensus core (`crates/kovanica-dag`), and
+> the UTXO ledger/state layer that applies transactions in GHOSTDAG-linearized
+> order with ed25519 spend authorisation (`crates/kovanica-state`). Layers around
+> them (networking, mempool, node binary, RPC, persistence) do not exist yet and
+> are marked **TODO** below. Keep this file in sync with the code: update it in
+> the same change that adds or moves the structure it describes.
 
 ---
 
@@ -51,7 +53,7 @@ Keep these terms precise and consistent across code, comments, and docs:
 ## 3. Repository layout
 
 ```
-Cargo.toml                     Workspace manifest (resolver 2); shared deps: blake3, hex
+Cargo.toml                     Workspace manifest (resolver 2); shared deps: blake3, hex, ed25519-dalek
 crates/
   kovanica-dag/                The DAG + GHOSTDAG consensus core (first slice)
     src/
@@ -62,12 +64,21 @@ crates/
       ordering.rs              linearize() (deterministic topological order), selected_tip/selected_chain
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant)
+  kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
+    src/
+      lib.rs                   Crate docs + re-exports + an end-to-end doctest
+      keys.rs                  Address, KeyPair, verify() — ed25519 spend authorisation
+      tx.rs                    Transaction/TxId/OutPoint/TxInput/TxOutput; canonical encoding; sighash
+      utxo.rs                  UtxoSet: the unspent-output state, with balance/total_value
+      ledger.rs                apply_block() (strict, atomic) and apply_dag() (linearize → apply)
+    tests/
+      ledger.rs                Integration + adversarial (double-spend across parallel blocks, order-independence)
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): `network` (p2p
-gossip), `mempool` (tx dissemination), `ledger`/`state` (UTXO or accounts,
-validation), `crypto` (signatures/VRF beyond block hashing), `node` (binary, config,
-RPC). Update this tree when you add them.
+gossip), `mempool` (tx dissemination), `node` (binary, config, RPC). Some `crypto`
+exists (ed25519 spend signatures in `kovanica-state`); VRF and beyond remain TODO.
+Update this tree when you add them.
 
 ### Deliberate first-slice simplifications (do not mistake for the final design)
 
@@ -78,6 +89,11 @@ RPC). Update this tree when you add them.
 - **Linearization** is a deterministic topological sort keyed by the GHOSTDAG chain
   key (blue work, blue score, id). It is a valid total order in the GHOSTDAG spirit,
   not a bit-for-bit reproduction of Kaspa's mergeset ordering.
+- **State (`kovanica-state`)** applies transactions block-by-block over `linearize()`.
+  A subsidy is a single per-block constant (no halving schedule); coinbase maturity
+  is only "not spendable in the same block"; there are no tx size/weight limits and
+  no incremental re-org handling — `apply_dag` recomputes from a fresh state. See
+  `ledger.rs` module docs.
 
 ## 4. Build, test & run
 
@@ -134,8 +150,9 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
 
 ## Roadmap / next slices (in rough order)
 
-- [ ] Transactions + a UTXO or account state layer; apply state in linearized order.
-- [ ] Signatures (ed25519) and block/tx validation beyond structural checks.
+- [x] Transactions + a UTXO state layer; apply state in linearized order (`kovanica-state`).
+- [~] Signatures (ed25519) for spend authorisation done; block-level validation at
+      insert time (rejecting invalid blocks before state application) still TODO.
 - [ ] Reachability oracle to replace full per-block `past` sets.
 - [ ] Persistence (an on-disk store) for the DAG and consensus data.
 - [ ] p2p networking / gossip and a runnable node binary with RPC.
