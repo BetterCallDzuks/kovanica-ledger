@@ -110,23 +110,15 @@ impl Dag {
     /// matching the mergeset order used when the block was coloured.
     fn mergeset_order(&self, block: &BlockId) -> Vec<BlockId> {
         let node = &self.nodes[block];
-        let Some(selected_parent) = node.ghostdag.selected_parent else {
-            return Vec::new(); // genesis merges nothing
-        };
-        let sp_past = &self.nodes[&selected_parent].past;
-        let mut mergeset: Vec<BlockId> = node
-            .past
-            .iter()
-            .copied()
-            .filter(|b| *b != selected_parent && !sp_past.contains(b))
-            .collect();
-        mergeset.sort_by_key(|b| self.topo_key(b));
-        mergeset
+        match node.ghostdag.selected_parent {
+            Some(selected_parent) => self.mergeset_ordered(selected_parent, &node.past),
+            None => Vec::new(), // genesis merges nothing
+        }
     }
 
     /// Topological sort key: `(|past|, id)`. A strict ancestor has a strictly
     /// smaller past, so this always orders ancestors before descendants, with the
-    /// id as a deterministic final tiebreak.
+    /// id as a deterministic final tiebreak. Used for the linearization's tail.
     fn topo_key(&self, id: &BlockId) -> (usize, BlockId) {
         (self.nodes[id].past.len(), *id)
     }

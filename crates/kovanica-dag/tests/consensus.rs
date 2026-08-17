@@ -397,6 +397,46 @@ fn selected_chain_is_a_subsequence_on_a_wide_fork() {
 }
 
 #[test]
+fn preview_matches_the_block_after_insert() {
+    // preview(block) must return the same selected parent and mergeset the block
+    // actually gets once inserted — that equivalence is what lets a caller
+    // validate a block against its view before committing it.
+    let (mut dag, genesis) = new_dag(3);
+    let a = add(&mut dag, &[genesis], "a");
+    let b = add(&mut dag, &[genesis], "b");
+
+    // A merge of a and b, previewed before it is inserted.
+    let m_block = Block::new(vec![a, b], 1, b"m".to_vec());
+    let preview = dag.preview(&m_block).unwrap();
+
+    let m = dag.insert(m_block).unwrap();
+    let gd = dag.ghostdag(&m).unwrap();
+    assert_eq!(preview.selected_parent, gd.selected_parent.unwrap());
+    // The previewed mergeset equals the actual mergeset (blues ∪ reds).
+    let mut actual: Vec<BlockId> = gd
+        .mergeset_blues
+        .iter()
+        .chain(&gd.mergeset_reds)
+        .copied()
+        .collect();
+    let mut previewed = preview.mergeset.clone();
+    actual.sort();
+    previewed.sort();
+    assert_eq!(previewed, actual);
+
+    // preview mirrors insert's structural checks.
+    assert!(matches!(
+        dag.preview(&Block::new(vec![], 1, b"x".to_vec())),
+        Err(DagError::NoParents(_))
+    ));
+    let phantom = Block::genesis(1, b"phantom".to_vec()).id();
+    assert!(matches!(
+        dag.preview(&Block::new(vec![phantom], 1, b"y".to_vec())),
+        Err(DagError::MissingParent(_))
+    ));
+}
+
+#[test]
 fn installed_validator_rejects_blocks_at_insert() {
     // A validator that rejects any block whose payload does not start with b'k'.
     // It must run only after the structural DAG checks (parents present), and a

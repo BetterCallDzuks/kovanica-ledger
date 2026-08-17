@@ -39,13 +39,16 @@
 //! * [`apply_dag`] applies against a fresh state each call — there is no
 //!   incremental re-org handling yet (the GHOSTDAG order is taken as a snapshot).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use kovanica_dag::{BlockId, Dag};
+use kovanica_dag::{Block, BlockId, Dag, DagError, KParam};
 
 use crate::keys::verify;
-use crate::tx::{decode_block_payload, DecodeError, OutPoint, Transaction, TxId};
+use crate::tx::{
+    decode_block_payload, encode_block_payload, DecodeError, OutPoint, Transaction, TxId,
+};
 use crate::utxo::UtxoSet;
+use crate::validation::TxStructureValidator;
 
 /// Why a transaction or block could not be applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,6 +298,199 @@ pub fn apply_dag(dag: &Dag, subsidy: u64) -> LedgerRun {
         }
     }
     run
+}
+
+/// Why [`Ledger::insert`] could not add a block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerInsertError {
+    /// The DAG rejected the block on structure (missing/duplicate parents, or an
+    /// installed structural validator).
+    Dag(DagError),
+    /// The block's transactions are invalid against its view's UTXO state
+    /// (a stateful rule: a missing/already-spent input, a bad signature, value
+    /// not conserved, or coinbase overspend).
+    State(LedgerError),
+}
+
+impl From<DagError> for LedgerInsertError {
+    fn from(e: DagError) -> Self {
+        LedgerInsertError::Dag(e)
+    }
+}
+
+impl From<LedgerError> for LedgerInsertError {
+    fn from(e: LedgerError) -> Self {
+        LedgerInsertError::State(e)
+    }
+}
+
+impl core::fmt::Display for LedgerInsertError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            LedgerInsertError::Dag(e) => write!(f, "dag rejected block: {e}"),
+            LedgerInsertError::State(e) => write!(f, "invalid block state: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LedgerInsertError {}
+
+/// A DAG together with the **per-block UTXO state** each block induces.
+///
+/// [`apply_dag`] is the batch view: it (re)linearizes a finished DAG and folds
+/// every transaction from scratch. A `Ledger` is the *incremental* view. It owns
+/// a [`Dag`] and, for every block `B`, stores the UTXO set of `B`'s own view —
+/// the state after applying, in the recursive GHOSTDAG order, every transaction
+/// in `past(B) ∪ {B}`. That state is built cheaply from `B`'s selected parent:
+///
+/// ```text
+/// state(B) = apply( state(selected_parent(B)),
+///                   mergeset(B) blocks' transactions (in order),
+///                   B's own transactions )
+/// ```
+///
+/// Because `B`'s transactions are checked against this pre-state *before* the
+/// block is committed (via [`Dag::preview`]), a block that is invalid in its own
+/// view — it double-spends an ancestor's output, carries a bad signature, mints
+/// value, or overspends its coinbase — is rejected at insert and never enters
+/// the DAG. (Two *parallel* blocks that spend the same output are each valid in
+/// their own view and both admitted; their conflict is resolved only in the view
+/// of a block that merges them, exactly as GHOSTDAG intends.)
+///
+/// The structural [`TxStructureValidator`] is also installed on the underlying
+/// DAG, so malformed blocks are rejected even if the DAG is used directly.
+///
+/// State is kept per block in full (mirroring the crate's other O(n²) first-slice
+/// simplifications); storing compact per-block diffs is a later optimisation.
+pub struct Ledger {
+    dag: Dag,
+    subsidy: u64,
+    genesis: BlockId,
+    /// Per-block view UTXO state: `states[&b]` is the ledger state in `b`'s view.
+    states: HashMap<BlockId, UtxoSet>,
+}
+
+impl Ledger {
+    /// Create a ledger whose genesis block carries `genesis_txs` (typically a
+    /// single coinbase minting the initial supply). `k` is the GHOSTDAG
+    /// parameter and `subsidy` the per-block issuance allowance.
+    ///
+    /// Fails if `genesis_txs` are not a valid block on an empty UTXO set.
+    pub fn new(k: KParam, subsidy: u64, genesis_txs: &[Transaction]) -> Result<Self, LedgerError> {
+        let mut state = UtxoSet::new();
+        apply_block(&mut state, genesis_txs, subsidy)?;
+
+        let genesis = Block::genesis(1, encode_block_payload(genesis_txs));
+        let genesis_id = genesis.id();
+        let dag = Dag::with_validator(k, genesis, Box::new(TxStructureValidator));
+
+        let mut states = HashMap::new();
+        states.insert(genesis_id, state);
+        Ok(Self {
+            dag,
+            subsidy,
+            genesis: genesis_id,
+            states,
+        })
+    }
+
+    /// Borrow the underlying DAG (for consensus queries: tips, ghostdag,
+    /// `linearize`, `selected_chain`, …).
+    pub fn dag(&self) -> &Dag {
+        &self.dag
+    }
+
+    /// The genesis block id.
+    pub fn genesis(&self) -> BlockId {
+        self.genesis
+    }
+
+    /// The per-block issuance allowance.
+    pub fn subsidy(&self) -> u64 {
+        self.subsidy
+    }
+
+    /// The UTXO state in `block`'s own view, if `block` is present.
+    pub fn state(&self, block: &BlockId) -> Option<&UtxoSet> {
+        self.states.get(block)
+    }
+
+    /// Insert a block referencing `parents`, carrying `work` and `txs`.
+    ///
+    /// Validates `txs` against the block's view UTXO state and, on success, adds
+    /// the block to the DAG and stores its per-block state. On any error the
+    /// ledger and DAG are left unchanged and the block is not added.
+    pub fn insert(
+        &mut self,
+        parents: Vec<BlockId>,
+        work: u128,
+        txs: &[Transaction],
+    ) -> Result<BlockId, LedgerInsertError> {
+        let block = Block::new(parents, work, encode_block_payload(txs));
+
+        // Build the block's view pre-state: its selected parent's state with the
+        // mergeset blocks' transactions applied in order. Previewing gets the
+        // selected parent and mergeset without mutating the DAG.
+        let preview = self.dag.preview(&block)?;
+        let mut state = self
+            .states
+            .get(&preview.selected_parent)
+            .expect("selected parent always has a stored state")
+            .clone();
+        for merged in &preview.mergeset {
+            let payload = self
+                .dag
+                .block(merged)
+                .expect("mergeset block is in the DAG")
+                .payload();
+            if let Ok(merged_txs) = decode_block_payload(payload) {
+                // A merged block that conflicts in this view simply does not
+                // apply — its transactions were valid in their own view, not
+                // necessarily here. This mirrors apply_dag's per-block reject.
+                let _ = apply_block(&mut state, &merged_txs, self.subsidy);
+            }
+        }
+
+        // Stateful validation: the block's own transactions must be valid against
+        // its view pre-state. Failure rejects the block before it enters the DAG.
+        apply_block(&mut state, txs, self.subsidy)?;
+
+        // Commit: add to the DAG (structural checks run here) and store the state.
+        let id = self.dag.insert(block)?;
+        self.states.insert(id, state);
+        Ok(id)
+    }
+
+    /// The full current ledger state: every block applied in linearized order.
+    ///
+    /// Built incrementally as the selected tip's view state plus the side blocks
+    /// under the other tips (the linearization's tail). Equal to
+    /// `apply_dag(self.dag(), self.subsidy()).utxo`.
+    pub fn ledger_state(&self) -> UtxoSet {
+        let order = self.dag.linearize();
+        let selected_tip = self.dag.selected_tip();
+        let tip_pos = order
+            .iter()
+            .position(|b| *b == selected_tip)
+            .expect("selected tip is in the order");
+
+        let mut state = self
+            .states
+            .get(&selected_tip)
+            .expect("selected tip has a stored state")
+            .clone();
+        for block in &order[tip_pos + 1..] {
+            let payload = self
+                .dag
+                .block(block)
+                .expect("block is in the DAG")
+                .payload();
+            if let Ok(txs) = decode_block_payload(payload) {
+                let _ = apply_block(&mut state, &txs, self.subsidy);
+            }
+        }
+        state
+    }
 }
 
 #[cfg(test)]
