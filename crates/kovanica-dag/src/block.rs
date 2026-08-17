@@ -1,0 +1,146 @@
+//! Block identity and the block type.
+//!
+//! A [`Block`] is the unit of the DAG. Unlike a linear chain, a block may
+//! reference **multiple** parents (the tips its miner observed), which is what
+//! lets the ledger admit parallel blocks and, in turn, high block throughput.
+//!
+//! A [`BlockId`] is the BLAKE3 hash of the block's canonical encoding, so it is
+//! a stable, collision-resistant identifier that every node derives identically.
+
+use core::fmt;
+
+/// 32-byte BLAKE3 digest identifying a block.
+///
+/// Ordering is defined over the raw bytes so that consensus tie-breaks (which
+/// fall back to the id) are deterministic across nodes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockId([u8; 32]);
+
+impl BlockId {
+    /// Construct a `BlockId` from raw bytes (mainly for tests and decoding).
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw 32 bytes of the digest.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Lowercase hex rendering of the full digest.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+impl fmt::Debug for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Short prefix keeps DAG dumps readable; full id via `to_hex`.
+        write!(f, "BlockId({}…)", &self.to_hex()[..8])
+    }
+}
+
+impl fmt::Display for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// A block: a vertex of the DAG.
+///
+/// Consensus (GHOSTDAG) only interprets `parents` and `work`; `payload` is
+/// opaque bytes (transactions, in a full ledger) and only affects the id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    /// Ids of the parent blocks this block references. Empty only for genesis.
+    parents: Vec<BlockId>,
+    /// The block's own work/difficulty weight; contributes to blue work.
+    work: u128,
+    /// Opaque application payload; not interpreted by consensus.
+    payload: Vec<u8>,
+}
+
+impl Block {
+    /// Create a block referencing `parents` with the given `work` and `payload`.
+    ///
+    /// Parents are de-duplicated and sorted so the id is independent of the
+    /// order in which a miner happened to list them.
+    pub fn new(mut parents: Vec<BlockId>, work: u128, payload: Vec<u8>) -> Self {
+        parents.sort_unstable();
+        parents.dedup();
+        Self {
+            parents,
+            work,
+            payload,
+        }
+    }
+
+    /// The canonical genesis block: no parents, the given work and payload.
+    pub fn genesis(work: u128, payload: Vec<u8>) -> Self {
+        Self {
+            parents: Vec::new(),
+            work,
+            payload,
+        }
+    }
+
+    /// The block's parents (sorted, de-duplicated).
+    pub fn parents(&self) -> &[BlockId] {
+        &self.parents
+    }
+
+    /// The block's work weight.
+    pub fn work(&self) -> u128 {
+        self.work
+    }
+
+    /// The opaque application payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Deterministic BLAKE3 id over the canonical encoding.
+    ///
+    /// Encoding (all integers little-endian): `parents.len()` as u64, each
+    /// parent's 32 bytes in sorted order, `work` as u128, `payload.len()` as
+    /// u64, then the payload bytes. Length prefixes make the encoding
+    /// unambiguous (no two distinct blocks share an encoding).
+    pub fn id(&self) -> BlockId {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&(self.parents.len() as u64).to_le_bytes());
+        for parent in &self.parents {
+            hasher.update(parent.as_bytes());
+        }
+        hasher.update(&self.work.to_le_bytes());
+        hasher.update(&(self.payload.len() as u64).to_le_bytes());
+        hasher.update(&self.payload);
+        BlockId(*hasher.finalize().as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_is_deterministic() {
+        let b = Block::new(vec![], 1, b"a".to_vec());
+        assert_eq!(b.id(), b.id());
+    }
+
+    #[test]
+    fn id_independent_of_parent_order() {
+        let p1 = Block::genesis(1, b"p1".to_vec()).id();
+        let p2 = Block::new(vec![p1], 1, b"p2".to_vec()).id();
+        let a = Block::new(vec![p1, p2], 1, b"c".to_vec());
+        let b = Block::new(vec![p2, p1], 1, b"c".to_vec());
+        assert_eq!(a.id(), b.id());
+    }
+
+    #[test]
+    fn distinct_payload_distinct_id() {
+        let a = Block::new(vec![], 1, b"a".to_vec());
+        let b = Block::new(vec![], 1, b"b".to_vec());
+        assert_ne!(a.id(), b.id());
+    }
+}
