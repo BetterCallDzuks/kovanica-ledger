@@ -62,8 +62,9 @@ crates/
       dag.rs                   Dag store: insert/validate, past sets, tips, GhostdagData, chain_key
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (deterministic topological order), selected_tip/selected_chain
+      validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
     tests/
-      consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant)
+      consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
     src/
       lib.rs                   Crate docs + re-exports + an end-to-end doctest
@@ -71,8 +72,10 @@ crates/
       tx.rs                    Transaction/TxId/OutPoint/TxInput/TxOutput; canonical encoding; sighash
       utxo.rs                  UtxoSet: the unspent-output state, with balance/total_value
       ledger.rs                apply_block() (strict, atomic) and apply_dag() (linearize → apply)
+      validation.rs            TxStructureValidator: context-free structural checks (a BlockValidator)
     tests/
       ledger.rs                Integration + adversarial (double-spend across parallel blocks, order-independence)
+      validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): `network` (p2p
@@ -94,6 +97,12 @@ Update this tree when you add them.
   is only "not spendable in the same block"; there are no tx size/weight limits and
   no incremental re-org handling — `apply_dag` recomputes from a fresh state. See
   `ledger.rs` module docs.
+- **Insert-time validation** is context-free only. `Dag::with_validator` +
+  `TxStructureValidator` reject malformed/structurally-invalid blocks at insert;
+  the **stateful** rules (input existence, signatures, value conservation, coinbase
+  amount) still run at apply time in `ledger.rs`, because full stateful validation
+  at insert needs per-block UTXO state (selected-parent UTXO set + mergeset diffs),
+  which is not built yet. See `validation.rs` module docs in both crates.
 
 ## 4. Build, test & run
 
@@ -151,8 +160,12 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
 ## Roadmap / next slices (in rough order)
 
 - [x] Transactions + a UTXO state layer; apply state in linearized order (`kovanica-state`).
-- [~] Signatures (ed25519) for spend authorisation done; block-level validation at
-      insert time (rejecting invalid blocks before state application) still TODO.
+- [x] Signatures (ed25519) for spend authorisation.
+- [~] Block-level validation at insert time: context-free structural validation done
+      (`BlockValidator` hook + `TxStructureValidator`); stateful (UTXO-aware) validation
+      at insert still TODO — it needs per-block UTXO state (below).
+- [ ] Per-block UTXO state (selected-parent UTXO set + mergeset diffs) to enable
+      stateful validation at insert and incremental re-orgs.
 - [ ] Reachability oracle to replace full per-block `past` sets.
 - [ ] Persistence (an on-disk store) for the DAG and consensus data.
 - [ ] p2p networking / gossip and a runnable node binary with RPC.

@@ -13,6 +13,10 @@
 //!   k-cluster blue/red colouring that identifies the well-connected cluster.
 //! * **Linearization** ([`ordering`]) — a deterministic total order over the
 //!   whole DAG, plus the selected (heaviest) chain it is built around.
+//! * **Validation** ([`validation`]) — an optional, payload-aware
+//!   [`BlockValidator`] hook run at insert time, so invalid blocks can be
+//!   rejected before they enter the DAG. The core stays payload-agnostic; the
+//!   layer that defines the payload (e.g. `kovanica-state`) plugs in the rules.
 //!
 //! ## Quick tour
 //!
@@ -44,6 +48,8 @@ pub mod block;
 pub mod dag;
 pub mod ghostdag;
 pub mod ordering;
+pub mod validation;
 
 pub use block::{Block, BlockId};
 pub use dag::{Dag, DagError, GhostdagData, KParam};
+pub use validation::BlockValidator;

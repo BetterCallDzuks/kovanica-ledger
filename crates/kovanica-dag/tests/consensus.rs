@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use kovanica_dag::{Block, BlockId, Dag};
+use kovanica_dag::{Block, BlockId, Dag, DagError};
 
 /// Build a DAG with the given `k` and a fixed genesis.
 fn new_dag(k: u16) -> (Dag, BlockId) {
@@ -327,4 +327,49 @@ fn colouring_check_b_reds_candidate_against_saturated_blue() {
     );
     assert!(gd_b.mergeset_reds.contains(&c), "check (b) must red C");
     assert!(!gd_b.mergeset_blues.contains(&c));
+}
+
+#[test]
+fn installed_validator_rejects_blocks_at_insert() {
+    // A validator that rejects any block whose payload does not start with b'k'.
+    // It must run only after the structural DAG checks (parents present), and a
+    // rejected block must not be added to the DAG.
+    let genesis = Block::genesis(1, b"kovanica-genesis".to_vec());
+    let genesis_id = genesis.id();
+    let mut dag = Dag::with_validator(
+        3,
+        genesis,
+        Box::new(|block: &Block, _dag: &Dag| {
+            if block.payload().first() == Some(&b'k') {
+                Ok(())
+            } else {
+                Err("payload must start with 'k'".to_string())
+            }
+        }),
+    );
+
+    // Accepted: payload starts with 'k'.
+    let good = dag
+        .insert(Block::new(vec![genesis_id], 1, b"keep".to_vec()))
+        .expect("valid block accepted");
+
+    // Rejected by the validator: surfaced as DagError, and not added.
+    let before = dag.len();
+    let err = dag
+        .insert(Block::new(vec![good], 1, b"drop".to_vec()))
+        .unwrap_err();
+    assert!(
+        matches!(err, DagError::InvalidBlock { .. }),
+        "validator rejection is an InvalidBlock error, got {err:?}"
+    );
+    assert_eq!(dag.len(), before, "rejected block was not added");
+    assert_eq!(dag.tips(), vec![good], "good block is still the only tip");
+
+    // Structural DAG checks run before the validator: a missing-parent block
+    // fails as MissingParent, not InvalidBlock, even though its payload is bad.
+    let phantom_id = Block::genesis(1, b"phantom".to_vec()).id();
+    let err = dag
+        .insert(Block::new(vec![phantom_id], 1, b"drop".to_vec()))
+        .unwrap_err();
+    assert!(matches!(err, DagError::MissingParent(_)));
 }
