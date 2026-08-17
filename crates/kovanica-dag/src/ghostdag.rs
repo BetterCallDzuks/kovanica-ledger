@@ -37,19 +37,12 @@ impl Dag {
             .select_parent(parents)
             .expect("non-genesis block always has at least one parent");
 
-        // Mergeset = past(block) \ (past(selected_parent) ∪ {selected_parent}).
-        // These are exactly the blocks in the selected parent's anticone that
-        // the new block merges in.
+        // Mergeset = past(block) \ (past(selected_parent) ∪ {selected_parent}):
+        // exactly the blocks in the selected parent's anticone that the new block
+        // merges in, in the deterministic topological order shared with the
+        // linearization (see [`Dag::mergeset_ordered`]).
+        let mergeset = self.mergeset_ordered(selected_parent, past);
         let sp_node = &self.nodes[&selected_parent];
-        let mut mergeset: Vec<BlockId> = past
-            .iter()
-            .copied()
-            .filter(|b| *b != selected_parent && !sp_node.past.contains(b))
-            .collect();
-        // Topological order: a strict ancestor has a strictly smaller past, so
-        // ordering by (|past|, id) always places ancestors before descendants
-        // and is otherwise a deterministic tiebreak.
-        mergeset.sort_by_key(|b| (self.nodes[b].past.len(), *b));
 
         // Seed the new block's blue set with the selected parent's blue set,
         // then the selected parent itself. The selected parent's blues are all

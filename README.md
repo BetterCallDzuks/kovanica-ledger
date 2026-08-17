@@ -30,6 +30,10 @@ protocol behind Kaspa).
   order, so a double-spend split across parallel blocks is resolved
   deterministically — the block that wins the linearization spends the output;
   the loser is rejected.
+- **Per-block UTXO state** (`Ledger`): each block's view state is maintained
+  incrementally from its selected parent, so a block invalid in its own view
+  (double-spending an ancestor, a bad signature) is rejected *at insert* and never
+  enters the DAG. The full state matches the batch `apply_dag`.
 
 ## Build & test
 

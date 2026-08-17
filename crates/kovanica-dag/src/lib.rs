@@ -51,5 +51,5 @@ pub mod ordering;
 pub mod validation;
 
 pub use block::{Block, BlockId};
-pub use dag::{Dag, DagError, GhostdagData, KParam};
+pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam};
 pub use validation::BlockValidator;

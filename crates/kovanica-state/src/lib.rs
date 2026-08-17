@@ -22,6 +22,10 @@
 //!   structural validation of a block's transactions, installable on a
 //!   [`kovanica_dag::Dag`] so malformed blocks are rejected *at insert time*
 //!   (see [`validation`]). Stateful rules stay in [`apply_block`].
+//! * [`Ledger`] — a DAG that maintains the **per-block UTXO state** each block
+//!   induces, built incrementally from each block's selected parent. It performs
+//!   *stateful* validation at insert (a block invalid in its own view never
+//!   enters the DAG) and its full state matches [`apply_dag`].
 //!
 //! ## Quick tour
 //!
@@ -69,7 +73,9 @@ pub mod utxo;
 pub mod validation;
 
 pub use keys::{verify, Address, KeyPair};
-pub use ledger::{apply_block, apply_dag, BlockSummary, LedgerError, LedgerRun};
+pub use ledger::{
+    apply_block, apply_dag, BlockSummary, Ledger, LedgerError, LedgerInsertError, LedgerRun,
+};
 pub use tx::{
     decode_block_payload, encode_block_payload, DecodeError, OutPoint, Sig, Transaction, TxId,
     TxInput, TxOutput,

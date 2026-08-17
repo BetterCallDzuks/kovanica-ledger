@@ -59,7 +59,7 @@ crates/
     src/
       lib.rs                   Crate docs + re-exports + a doctest quick tour
       block.rs                 Block (multi-parent vertex) and BlockId (BLAKE3 hash)
-      dag.rs                   Dag store: insert/validate, past sets, tips, GhostdagData, chain_key
+      dag.rs                   Dag store: insert/validate, past sets, tips, GhostdagData, preview(), chain_key
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
@@ -71,11 +71,12 @@ crates/
       keys.rs                  Address, KeyPair, verify() — ed25519 spend authorisation
       tx.rs                    Transaction/TxId/OutPoint/TxInput/TxOutput; canonical encoding; sighash
       utxo.rs                  UtxoSet: the unspent-output state, with balance/total_value
-      ledger.rs                apply_block() (strict, atomic) and apply_dag() (linearize → apply)
+      ledger.rs                apply_block()/apply_dag() (batch) + Ledger (per-block UTXO state, stateful insert)
       validation.rs            TxStructureValidator: context-free structural checks (a BlockValidator)
     tests/
       ledger.rs                Integration + adversarial (double-spend across parallel blocks, order-independence)
       validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
+      perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): `network` (p2p
@@ -96,17 +97,20 @@ Update this tree when you add them.
   sits directly before its merger. Mergeset order within a block is a deterministic
   topological sort by `(|past|, id)` — a valid GHOSTDAG-spirit order, not Kaspa's
   exact blue-work mergeset tiebreak. See `ordering.rs` module docs.
-- **State (`kovanica-state`)** applies transactions block-by-block over `linearize()`.
-  A subsidy is a single per-block constant (no halving schedule); coinbase maturity
-  is only "not spendable in the same block"; there are no tx size/weight limits and
-  no incremental re-org handling — `apply_dag` recomputes from a fresh state. See
-  `ledger.rs` module docs.
-- **Insert-time validation** is context-free only. `Dag::with_validator` +
-  `TxStructureValidator` reject malformed/structurally-invalid blocks at insert;
-  the **stateful** rules (input existence, signatures, value conservation, coinbase
-  amount) still run at apply time in `ledger.rs`, because full stateful validation
-  at insert needs per-block UTXO state (selected-parent UTXO set + mergeset diffs),
-  which is not built yet. See `validation.rs` module docs in both crates.
+- **State (`kovanica-state`)** applies transactions in GHOSTDAG order. Two views:
+  `apply_dag` folds a finished DAG from scratch; `Ledger` maintains each block's
+  view state incrementally from its selected parent (per-block state stored in
+  full — the same O(n²) trade-off as `past` sets). A subsidy is a single per-block
+  constant (no halving schedule); coinbase maturity is only "not spendable in the
+  same block"; there are no tx size/weight limits. `Ledger` is append-only — no
+  pruning or re-org/revert of stored states yet. See `ledger.rs` module docs.
+- **Insert-time validation** now has both layers. `Dag::with_validator` +
+  `TxStructureValidator` reject malformed/structurally-invalid blocks; `Ledger`
+  additionally runs the **stateful** rules (input existence, signatures, value
+  conservation, coinbase amount) against a block's view state before it enters the
+  DAG (via `Dag::preview`), so a block invalid in its own view is rejected at
+  insert. Two *parallel* blocks that spend the same output are each valid in their
+  own view and both admitted; their conflict resolves only in a merger's view.
 
 ## 4. Build, test & run
 
@@ -165,14 +169,16 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
 
 - [x] Transactions + a UTXO state layer; apply state in linearized order (`kovanica-state`).
 - [x] Signatures (ed25519) for spend authorisation.
-- [~] Block-level validation at insert time: context-free structural validation done
-      (`BlockValidator` hook + `TxStructureValidator`); stateful (UTXO-aware) validation
-      at insert still TODO — it needs per-block UTXO state (below).
+- [x] Block-level validation at insert time: context-free structural validation
+      (`BlockValidator` hook + `TxStructureValidator`) and stateful (UTXO-aware)
+      validation (`Ledger` + `Dag::preview`).
 - [x] Recursive GHOSTDAG linearization (`order(B) = order(sp) ++ mergeset ++ [B]`),
       the ordering per-block UTXO state composes along.
-- [ ] Per-block UTXO state (selected-parent UTXO set + mergeset diffs) built along
-      the recursive order, to enable stateful validation at insert and incremental re-orgs.
+- [x] Per-block UTXO state built incrementally from each block's selected parent
+      (`Ledger`), matching `apply_dag`; enables stateful validation at insert.
+- [ ] Incremental re-orgs / state revert + pruning (finality depth); `Ledger` is
+      append-only today and stores each block's state in full.
 - [ ] Reachability oracle to replace full per-block `past` sets.
 - [ ] Persistence (an on-disk store) for the DAG and consensus data.
 - [ ] p2p networking / gossip and a runnable node binary with RPC.
-- [ ] Pruning / finality depth; difficulty adjustment for `work`.
+- [ ] Difficulty adjustment for `work`.

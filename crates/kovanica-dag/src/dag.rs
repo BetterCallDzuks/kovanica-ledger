@@ -79,6 +79,16 @@ pub struct GhostdagData {
     pub blue_anticone_sizes: HashMap<BlockId, KParam>,
 }
 
+/// The GHOSTDAG data a block *would* receive, computed by [`Dag::preview`]
+/// without inserting the block.
+#[derive(Clone, Debug)]
+pub struct BlockPreview {
+    /// The parent that would be the block's selected parent.
+    pub selected_parent: BlockId,
+    /// The block's mergeset, in the deterministic order the linearization uses.
+    pub mergeset: Vec<BlockId>,
+}
+
 /// A stored block: the block itself plus derived DAG/consensus data.
 pub(crate) struct Node {
     pub(crate) block: Block,
@@ -209,6 +219,61 @@ impl Dag {
     pub(crate) fn chain_key(&self, id: &BlockId) -> (u128, u64, BlockId) {
         let g = &self.nodes[id].ghostdag;
         (g.blue_work, g.blue_score, *id)
+    }
+
+    /// The mergeset for a block with selected parent `sp` and past set `past`,
+    /// in deterministic topological order:
+    /// `past \ (past(sp) ∪ {sp})`, sorted by `(|past|, id)`.
+    ///
+    /// Shared by GHOSTDAG colouring, the linearization, and [`Dag::preview`] so
+    /// all three agree on the mergeset and its order.
+    pub(crate) fn mergeset_ordered(&self, sp: BlockId, past: &HashSet<BlockId>) -> Vec<BlockId> {
+        let sp_past = &self.nodes[&sp].past;
+        let mut mergeset: Vec<BlockId> = past
+            .iter()
+            .copied()
+            .filter(|b| *b != sp && !sp_past.contains(b))
+            .collect();
+        mergeset.sort_by_key(|b| (self.nodes[b].past.len(), *b));
+        mergeset
+    }
+
+    /// Preview the GHOSTDAG selected parent and mergeset a block would get if it
+    /// were inserted with `block`'s parents — **without** inserting it.
+    ///
+    /// Runs the same structural checks as [`Dag::insert`] (duplicate, no parents,
+    /// missing parent) so a caller can validate a prospective block against its
+    /// view before committing it. This is what lets the state layer apply a
+    /// block's transactions on top of its selected parent's UTXO state and reject
+    /// an invalid block before it enters the DAG.
+    pub fn preview(&self, block: &Block) -> Result<BlockPreview, DagError> {
+        let id = block.id();
+        if self.nodes.contains_key(&id) {
+            return Err(DagError::DuplicateBlock(id));
+        }
+        if block.parents().is_empty() {
+            return Err(DagError::NoParents(id));
+        }
+        for parent in block.parents() {
+            if !self.nodes.contains_key(parent) {
+                return Err(DagError::MissingParent(*parent));
+            }
+        }
+        let selected_parent = *block
+            .parents()
+            .iter()
+            .max_by_key(|p| self.chain_key(p))
+            .expect("non-empty parents");
+        let mut past: HashSet<BlockId> = HashSet::new();
+        for parent in block.parents() {
+            past.insert(*parent);
+            past.extend(self.nodes[parent].past.iter().copied());
+        }
+        let mergeset = self.mergeset_ordered(selected_parent, &past);
+        Ok(BlockPreview {
+            selected_parent,
+            mergeset,
+        })
     }
 
     /// Insert `block`, validating and colouring it. Returns its id.
