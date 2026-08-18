@@ -59,10 +59,13 @@ fn demo() {
     let script = [
         "genesis 3 1000 500 1", // actor 1 is funded with 500
         "balance 1",
-        "send 1 200 2", // 1 -> 2 (200), change 300 back to 1
+        "send 1 200 2", // immediate block: 1 -> 2 (200), change 300 back to 1
         "balance 1",
         "balance 2",
-        "send 2 50 3", // 2 -> 3 (50), change 150 back to 2
+        "pool 2 50 3", // queue in the mempool instead of building a block now
+        "pending",
+        "produce", // pack the mempool into a block
+        "pending",
         "balance 2",
         "balance 3",
         "tip",

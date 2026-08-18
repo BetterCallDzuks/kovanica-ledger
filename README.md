@@ -7,8 +7,9 @@ protocol behind Kaspa).
 
 > Early stage. The block DAG + GHOSTDAG consensus core, a UTXO ledger applied in
 > GHOSTDAG order (with per-block state and snapshot persistence), and a runnable
-> single-node binary are implemented and tested; p2p networking is not built yet.
-> See [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and roadmap.
+> node binary with a mempool and multi-node block gossip are implemented and
+> tested; continuous p2p (peer discovery, relay) is not built yet. See
+> [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and roadmap.
 
 ## What's here
 
@@ -38,9 +39,12 @@ protocol behind Kaspa).
   `Ledger` serialise a compact replay log (blocks in topological order); loading
   recomputes all consensus and UTXO state, so nothing derived is trusted from disk.
 
-`crates/kovanica-node` — a runnable single-node binary tying the stack together
-behind a small line RPC (`serve` reads commands from stdin; `demo` replays a
-scripted scenario). Snapshot-backed via `save`/`load`. No p2p peers yet.
+`crates/kovanica-node` — a runnable node tying the stack together behind a small
+line RPC (`serve` reads commands from stdin; `demo` replays a scripted scenario).
+A **mempool** queues transfers (`pool`) that `produce` packs into a block, and
+nodes exchange blocks to converge on one DAG — in-process (`net::gossip`) or over
+TCP (`net::serve_blocks` / `pull_blocks`). Snapshot-backed via `save`/`load`.
+Continuous p2p (peer discovery, relay) is not built yet.
 
 ## Run the node
 
@@ -51,10 +55,23 @@ cargo run -p kovanica-node           # REPL: type commands, `help`, `quit`
 
 ```text
 > genesis 3 1000 500 1     # mint 500 to actor 1 (k=3, subsidy=1000)
-> send 1 200 2             # actor 1 sends 200 to actor 2 (as a new block)
-> balance 1                # ok 300
-> balance 2                # ok 200
+> send 1 200 2             # immediate block: actor 1 sends 200 to actor 2
+> pool 2 50 3              # queue a transfer in the mempool
+> produce                  # pack the mempool into a block
+> balance 3                # ok 50
 > save ledger.snap         # persist; `load ledger.snap` restores it
+```
+
+Two `Node`s that share a genesis converge by exchanging blocks:
+
+```rust
+use kovanica_node::{net, Node};
+
+let mut a = Node::new(); a.genesis(3, 1000, 1000, 1).unwrap();
+let mut b = Node::new(); b.genesis(3, 1000, 1000, 1).unwrap();
+a.send(1, 400, 2).unwrap();      // a produces a block
+net::gossip(&a, &mut b).unwrap(); // b catches up
+assert_eq!(b.balance(&Node::address(2)).unwrap(), 400);
 ```
 
 ## Build & test

@@ -26,7 +26,8 @@ use crate::node::Node;
 /// The help text listing every command.
 pub const HELP: &str = "commands: help | genesis <k> <subsidy> <amount> <seed> | \
 address <seed> | balance <seed|addr-hex> | send <from-seed> <amount> <to-seed> | \
-tips | tip | len | save <path> | load <path>";
+pool <from-seed> <amount> <to-seed> | produce | pending | tips | tip | len | \
+save <path> | load <path>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -78,6 +79,27 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
                 .send(u64_arg(from)?, u64_arg(amount)?, u64_arg(to)?)
                 .map_err(|e| e.to_string())?;
             Ok(format!("block {} tx {}", sent.block, sent.tx))
+        }
+
+        "pool" => {
+            let [from, amount, to] = fixed::<3>(&args)?;
+            let tx = node
+                .pool(u64_arg(from)?, u64_arg(amount)?, u64_arg(to)?)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("tx {tx}"))
+        }
+
+        "produce" => {
+            let [] = fixed::<0>(&args)?;
+            match node.produce_block().map_err(|e| e.to_string())? {
+                Some(block) => Ok(format!("block {block}")),
+                None => Ok("empty".to_string()),
+            }
+        }
+
+        "pending" => {
+            let [] = fixed::<0>(&args)?;
+            Ok(node.pending_count().to_string())
         }
 
         "tips" => {

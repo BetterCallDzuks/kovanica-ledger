@@ -12,9 +12,13 @@
 //!   out) — the node's "RPC". The binary wires it to stdin/stdout (`serve`) or
 //!   replays a scripted `demo`.
 //!
-//! This is a single-process node: there is no p2p gossip yet (a later slice), so
-//! it maintains one local DAG. Actors are integer *seeds* the node signs for —
-//! a demo convenience, not how a real node handles keys (see [`node`]).
+//! Nodes are multi-node aware: a [`Mempool`](mempool::Mempool) holds pending
+//! transactions, [`Node::produce_block`] packs the valid ones into a block, and
+//! blocks gossip between nodes ([`net::gossip`] in-process, or
+//! [`net::serve_blocks`] / [`net::pull_blocks`] over TCP) so peers converge on
+//! the same DAG. There is no peer discovery or continuous gossip loop yet (later
+//! slices). Actors are integer *seeds* the node signs for — a demo convenience,
+//! not how a real node handles keys (see [`node`]).
 //!
 //! ```
 //! use kovanica_node::{rpc, Node};
@@ -27,7 +31,11 @@
 //! assert_eq!(rpc::execute_line(&mut node, "balance 2"), "ok 200");
 //! ```
 
+pub mod mempool;
+pub mod net;
 pub mod node;
 pub mod rpc;
 
-pub use node::{Node, NodeError, Sent};
+pub use mempool::Mempool;
+pub use net::NetError;
+pub use node::{BlockRecord, Node, NodeError, Sent};

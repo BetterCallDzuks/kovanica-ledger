@@ -6,9 +6,10 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > tested: the block DAG and GHOSTDAG consensus core (`crates/kovanica-dag`); the
 > UTXO ledger/state layer that applies transactions in GHOSTDAG-linearized order
 > with ed25519 spend authorisation, per-block state, and snapshot persistence
-> (`crates/kovanica-state`); and a runnable single-node binary with a line RPC
-> (`crates/kovanica-node`). Still **TODO** (below): p2p networking, a mempool, and
-> multi-node operation. Keep this file in sync with the code: update it in the
+> (`crates/kovanica-state`); and a runnable node binary with a line RPC, a
+> mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
+> Still **TODO** (below): continuous p2p gossip with peer discovery, and
+> difficulty adjustment. Keep this file in sync with the code: update it in the
 > same change that adds or moves the structure it describes.
 
 ---
@@ -80,19 +81,24 @@ crates/
       validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
       perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
       persistence.rs           Integration: Ledger snapshot round-trip (state recomputed by replay)
-  kovanica-node/               Runnable node binary + line RPC (third slice: ties the stack together)
+  kovanica-node/               Runnable node binary, mempool, and block gossip (third slice + multi-node)
     src/
       lib.rs                   Crate docs + re-exports + a doctest of the RPC
-      node.rs                  Node: in-memory Ledger + genesis/send/balance/tips/save/load
+      node.rs                  Node: Ledger + Mempool; genesis/send/pool/produce/balance/tips/save/load + gossip
+      mempool.rs               Mempool: pending txs, deterministic (id) ordering for block assembly
+      net.rs                   gossip() (in-process) + serve_blocks/pull_blocks (one-shot TCP sync)
       rpc.rs                   execute_line(): the text command protocol (string in, string out)
       main.rs                  Binary: `serve` (stdin/stdout REPL) and `demo` (scripted scenario)
     tests/
       rpc.rs                   Integration: end-to-end transfers, errors, snapshot round-trip via RPC
+      mempool.rs               Integration: pool/produce assembly, conflict partial-inclusion
+      network.rs               Integration: multi-node convergence (in-process + conflict + TCP loopback)
 ```
 
-Not built yet (**TODO**, add crates under `crates/` as they land): `network` (p2p
-gossip) and `mempool` (tx dissemination) — `kovanica-node` is a single local node
-with no peers yet. Some `crypto` exists (ed25519 spend signatures in
+Not built yet (**TODO**, add crates under `crates/` as they land): continuous p2p
+gossip with peer discovery — `kovanica-node` today does one-shot block sync
+(pull-all) between two nodes, no peer set or relay loop. Some `crypto` exists
+(ed25519 spend signatures in
 `kovanica-state`); VRF and beyond remain TODO. Update this tree when you add them.
 
 ### Deliberate first-slice simplifications (do not mistake for the final design)
@@ -203,6 +209,10 @@ is a library plus a binary (`serve`/`demo`).
       future-covering sets); also rewires mergeset computation and the ordering key.
 - [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
 - [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
-      `serve`/`demo`, snapshot-backed). Single local node — no peers yet.
-- [ ] p2p networking / gossip (block/tx dissemination) and a mempool; multi-node.
+      `serve`/`demo`, snapshot-backed).
+- [x] Mempool + block production (`pool`/`produce`), and multi-node block
+      dissemination — in-process `gossip` and a one-shot TCP pull sync — with
+      nodes converging on the same DAG (conflicts resolved identically).
+- [ ] Continuous p2p gossip: peer discovery, a relay loop, tx (not just block)
+      dissemination; mempool eviction of permanently-invalid txs.
 - [ ] Difficulty adjustment for `work`.
