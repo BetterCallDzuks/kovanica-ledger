@@ -5,10 +5,10 @@ parents so they can be produced in parallel and merged, rather than forming a
 single linear chain. Consensus follows **GHOSTDAG** (the PHANTOM/GHOSTDAG
 protocol behind Kaspa).
 
-> Early stage. The block DAG + GHOSTDAG consensus core and a UTXO ledger applied
-> in GHOSTDAG order are implemented and tested; networking and a node binary are
-> not built yet. See [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and
-> roadmap.
+> Early stage. The block DAG + GHOSTDAG consensus core, a UTXO ledger applied in
+> GHOSTDAG order (with per-block state and snapshot persistence), and a runnable
+> single-node binary are implemented and tested; p2p networking is not built yet.
+> See [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and roadmap.
 
 ## What's here
 
@@ -37,6 +37,25 @@ protocol behind Kaspa).
 - **Persistence**: `write_snapshot`/`read_snapshot` on both the `Dag` and the
   `Ledger` serialise a compact replay log (blocks in topological order); loading
   recomputes all consensus and UTXO state, so nothing derived is trusted from disk.
+
+`crates/kovanica-node` — a runnable single-node binary tying the stack together
+behind a small line RPC (`serve` reads commands from stdin; `demo` replays a
+scripted scenario). Snapshot-backed via `save`/`load`. No p2p peers yet.
+
+## Run the node
+
+```sh
+cargo run -p kovanica-node -- demo   # scripted end-to-end scenario
+cargo run -p kovanica-node           # REPL: type commands, `help`, `quit`
+```
+
+```text
+> genesis 3 1000 500 1     # mint 500 to actor 1 (k=3, subsidy=1000)
+> send 1 200 2             # actor 1 sends 200 to actor 2 (as a new block)
+> balance 1                # ok 300
+> balance 2                # ok 200
+> save ledger.snap         # persist; `load ledger.snap` restores it
+```
 
 ## Build & test
 

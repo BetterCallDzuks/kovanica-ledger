@@ -2,13 +2,14 @@
 
 Guidance for AI assistants (and humans) working in the **kovanica-ledger** repository.
 
-> **Status: early implementation.** Two vertical slices exist, build, and are
-> tested: the block DAG and GHOSTDAG consensus core (`crates/kovanica-dag`), and
-> the UTXO ledger/state layer that applies transactions in GHOSTDAG-linearized
-> order with ed25519 spend authorisation (`crates/kovanica-state`). Layers around
-> them (networking, mempool, node binary, RPC, persistence) do not exist yet and
-> are marked **TODO** below. Keep this file in sync with the code: update it in
-> the same change that adds or moves the structure it describes.
+> **Status: early implementation.** Three vertical slices exist, build, and are
+> tested: the block DAG and GHOSTDAG consensus core (`crates/kovanica-dag`); the
+> UTXO ledger/state layer that applies transactions in GHOSTDAG-linearized order
+> with ed25519 spend authorisation, per-block state, and snapshot persistence
+> (`crates/kovanica-state`); and a runnable single-node binary with a line RPC
+> (`crates/kovanica-node`). Still **TODO** (below): p2p networking, a mempool, and
+> multi-node operation. Keep this file in sync with the code: update it in the
+> same change that adds or moves the structure it describes.
 
 ---
 
@@ -79,12 +80,20 @@ crates/
       validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
       perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
       persistence.rs           Integration: Ledger snapshot round-trip (state recomputed by replay)
+  kovanica-node/               Runnable node binary + line RPC (third slice: ties the stack together)
+    src/
+      lib.rs                   Crate docs + re-exports + a doctest of the RPC
+      node.rs                  Node: in-memory Ledger + genesis/send/balance/tips/save/load
+      rpc.rs                   execute_line(): the text command protocol (string in, string out)
+      main.rs                  Binary: `serve` (stdin/stdout REPL) and `demo` (scripted scenario)
+    tests/
+      rpc.rs                   Integration: end-to-end transfers, errors, snapshot round-trip via RPC
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): `network` (p2p
-gossip), `mempool` (tx dissemination), `node` (binary, config, RPC). Some `crypto`
-exists (ed25519 spend signatures in `kovanica-state`); VRF and beyond remain TODO.
-Update this tree when you add them.
+gossip) and `mempool` (tx dissemination) — `kovanica-node` is a single local node
+with no peers yet. Some `crypto` exists (ed25519 spend signatures in
+`kovanica-state`); VRF and beyond remain TODO. Update this tree when you add them.
 
 ### Deliberate first-slice simplifications (do not mistake for the final design)
 
@@ -127,9 +136,13 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
 - **Single test:** `cargo test <name>` (e.g. `cargo test adversarial_wide_fork`)
 - **Lint:** `cargo clippy --all-targets` (keep it warning-clean)
 - **Format:** `cargo fmt` (CI-style check: `cargo fmt --check`)
+- **Run the node:** `cargo run -p kovanica-node -- demo` (scripted end-to-end
+  scenario) or `cargo run -p kovanica-node` (a `serve` REPL reading commands from
+  stdin; try `help`).
 
 `unsafe` code is **forbidden** crate-wide (`#![forbid(unsafe_code)]` via
-`[lints.rust]`). There is no node binary to run yet; the crate is a library.
+`[lints.rust]`). `kovanica-dag`/`kovanica-state` are libraries; `kovanica-node`
+is a library plus a binary (`serve`/`demo`).
 
 ## 5. Engineering conventions
 
@@ -189,5 +202,7 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
 - [ ] Reachability oracle to replace full per-block `past` sets (interval labels +
       future-covering sets); also rewires mergeset computation and the ordering key.
 - [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
-- [ ] p2p networking / gossip and a runnable node binary with RPC.
+- [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
+      `serve`/`demo`, snapshot-backed). Single local node — no peers yet.
+- [ ] p2p networking / gossip (block/tx dissemination) and a mempool; multi-node.
 - [ ] Difficulty adjustment for `work`.
