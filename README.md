@@ -23,6 +23,9 @@ protocol behind Kaspa).
 - **Difficulty retargeting** (`difficulty::Retarget`): computes the `work` the
   next block should target from the timestamps + work of recent blocks, holding a
   steady block rate (the algorithm; consensus enforcement awaits block timestamps).
+- **Reachability oracle** (`reachability::Reachability`): an interval-tree +
+  future-covering-set index for O(1) ancestor queries without the O(n²) `past`
+  sets, differentially verified against them (not yet the DAG's backing store).
 
 `crates/kovanica-state` — the UTXO ledger:
 

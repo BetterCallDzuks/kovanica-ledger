@@ -70,8 +70,10 @@ crates/
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
       snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
       difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm)
+      reachability.rs          Reachability oracle: interval-tree + future-covering sets (verified, not yet the Dag's backing)
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
+      reachability.rs          Differential: oracle is_ancestor == past-set is_ancestor over random adversarial DAGs
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
     src/
       lib.rs                   Crate docs + re-exports + an end-to-end doctest
@@ -108,9 +110,13 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
 
 ### Deliberate first-slice simplifications (do not mistake for the final design)
 
-- **Reachability** is answered from a per-block `past` set stored in full: O(1)
-  queries but O(n²) memory. Production replaces this with a reachability oracle
-  (interval labels). See `dag.rs` module docs.
+- **Reachability** is still answered from a per-block `past` set stored in full:
+  O(1) queries but O(n²) memory. The replacement — an interval-tree +
+  future-covering-set oracle (`reachability::Reachability`) — is implemented and
+  **differentially verified** against the `past` sets, but is not yet what `Dag`
+  uses; the cutover (incremental maintenance + interval reindexing, then dropping
+  the `past` sets, which also rewires mergeset computation and the ordering key)
+  is the follow-up. See `dag.rs` and `reachability.rs` module docs.
 - **In-memory working state**, with **replay-log persistence**: `Dag`/`Ledger`
   `write_snapshot`/`read_snapshot` serialise only `k`, the subsidy, and the blocks
   in topological order; loading replays inserts so all derived state (past sets,
@@ -220,9 +226,12 @@ is a library plus a binary (`serve`/`demo`).
       follow the selected tip (implicit re-org, no revert).
 - [x] Persistence: replay-log snapshots of the DAG and ledger
       (`Dag`/`Ledger` `write_snapshot`/`read_snapshot`) — state recomputed on load.
-- [ ] Reachability oracle to replace full per-block `past` sets (interval labels +
-      future-covering sets); also rewires mergeset computation and the ordering key,
-      and unlocks DAG-level (not just state) pruning.
+- [~] Reachability oracle (`reachability::Reachability`): interval-tree +
+      future-covering sets, built from the DAG and differentially verified against
+      the `past` sets. Cutover — making it the `Dag`'s backing (incremental
+      maintenance + interval reindexing), dropping the `past` sets, and rewiring
+      mergeset computation and the ordering key — is the follow-up; it also unlocks
+      DAG-level (not just state) pruning.
 - [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
 - [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
       `serve`/`demo`, snapshot-backed).
