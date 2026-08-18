@@ -59,8 +59,11 @@ protocol behind Kaspa).
 line RPC (`serve` reads commands from stdin; `demo` replays a scripted scenario).
 A **mempool** queues transfers (`pool`) that `produce` packs into a block, and
 nodes exchange blocks to converge on one DAG — in-process (`net::gossip`) or over
-TCP (`net::serve_blocks` / `pull_blocks`). Snapshot-backed via `save`/`load`.
-Continuous p2p (peer discovery, relay) is not built yet.
+TCP (`net::serve_blocks` / `pull_blocks`). Produced blocks are stamped with the
+node's wall clock (clamped monotone above their parents), and `receive_block`
+rejects a peer's block dated more than two hours ahead of local time — node
+policy, not pure-DAG consensus. Snapshot-backed via `save`/`load`. Continuous p2p
+(peer discovery, relay) is not built yet.
 
 ## Run the node
 
