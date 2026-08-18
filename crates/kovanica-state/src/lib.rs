@@ -25,7 +25,10 @@
 //! * [`Ledger`] — a DAG that maintains the **per-block UTXO state** each block
 //!   induces, built incrementally from each block's selected parent. It performs
 //!   *stateful* validation at insert (a block invalid in its own view never
-//!   enters the DAG) and its full state matches [`apply_dag`].
+//!   enters the DAG) and its full state matches [`apply_dag`]. It also
+//!   **persists**: [`Ledger::write_snapshot`] / [`Ledger::read_snapshot`]
+//!   round-trip the whole ledger by replaying blocks (state is recomputed, not
+//!   trusted from disk), built on [`kovanica_dag::Dag::write_snapshot`].
 //!
 //! ## Quick tour
 //!
@@ -75,6 +78,7 @@ pub mod validation;
 pub use keys::{verify, Address, KeyPair};
 pub use ledger::{
     apply_block, apply_dag, BlockSummary, Ledger, LedgerError, LedgerInsertError, LedgerRun,
+    LedgerSnapshotError,
 };
 pub use tx::{
     decode_block_payload, encode_block_payload, DecodeError, OutPoint, Sig, Transaction, TxId,

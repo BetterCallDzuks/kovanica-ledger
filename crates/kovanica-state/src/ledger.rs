@@ -41,7 +41,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use kovanica_dag::{Block, BlockId, Dag, DagError, KParam};
+use kovanica_dag::{decode_snapshot, Block, BlockId, Dag, DagError, KParam, SnapshotError};
 
 use crate::keys::verify;
 use crate::tx::{
@@ -491,7 +491,95 @@ impl Ledger {
         }
         state
     }
+
+    /// Serialise the ledger to a self-contained snapshot: the subsidy plus the
+    /// underlying DAG's replay log (see [`Dag::write_snapshot`]). Per-block UTXO
+    /// state is *not* stored — it is recomputed on load by replaying blocks
+    /// through [`Ledger::insert`], so nothing derived is trusted from disk.
+    pub fn write_snapshot(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&LEDGER_MAGIC);
+        buf.extend_from_slice(&LEDGER_VERSION.to_le_bytes());
+        buf.extend_from_slice(&self.subsidy.to_le_bytes());
+        buf.extend_from_slice(&self.dag.write_snapshot());
+        buf
+    }
+
+    /// Rebuild a ledger from a snapshot by replaying its blocks. The full state
+    /// (and each block's view state) is recomputed, so the restored ledger is
+    /// identical to the original.
+    pub fn read_snapshot(bytes: &[u8]) -> Result<Ledger, LedgerSnapshotError> {
+        if bytes.len() < 4 || bytes[..4] != LEDGER_MAGIC {
+            return Err(LedgerSnapshotError::BadMagic);
+        }
+        if bytes.len() < 14 {
+            return Err(LedgerSnapshotError::Dag(SnapshotError::UnexpectedEof));
+        }
+        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+        if version != LEDGER_VERSION {
+            return Err(LedgerSnapshotError::UnsupportedVersion(version));
+        }
+        let subsidy = u64::from_le_bytes(bytes[6..14].try_into().expect("14 - 6 == 8 bytes"));
+
+        let snapshot = decode_snapshot(&bytes[14..]).map_err(LedgerSnapshotError::Dag)?;
+        let mut blocks = snapshot.blocks.into_iter();
+        let genesis = blocks.next().ok_or(LedgerSnapshotError::Empty)?;
+        let genesis_txs =
+            decode_block_payload(genesis.payload()).map_err(LedgerSnapshotError::Payload)?;
+        let mut ledger =
+            Ledger::new(snapshot.k, subsidy, &genesis_txs).map_err(LedgerSnapshotError::Genesis)?;
+        for block in blocks {
+            let txs =
+                decode_block_payload(block.payload()).map_err(LedgerSnapshotError::Payload)?;
+            ledger
+                .insert(block.parents().to_vec(), block.work(), &txs)
+                .map_err(LedgerSnapshotError::Rebuild)?;
+        }
+        Ok(ledger)
+    }
 }
+
+/// Magic prefix identifying a Kovanica ledger snapshot (`"KVLG"`).
+const LEDGER_MAGIC: [u8; 4] = *b"KVLG";
+/// Ledger snapshot format version.
+const LEDGER_VERSION: u16 = 1;
+
+/// Why a ledger snapshot could not be decoded or replayed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerSnapshotError {
+    /// The bytes did not start with the expected magic prefix.
+    BadMagic,
+    /// The snapshot version is not supported by this build.
+    UnsupportedVersion(u16),
+    /// The embedded DAG snapshot could not be decoded.
+    Dag(SnapshotError),
+    /// A block's payload was not valid transaction encoding.
+    Payload(DecodeError),
+    /// Applying the genesis transactions failed.
+    Genesis(LedgerError),
+    /// Replaying a block through `insert` failed.
+    Rebuild(LedgerInsertError),
+    /// The snapshot contained no genesis block.
+    Empty,
+}
+
+impl core::fmt::Display for LedgerSnapshotError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            LedgerSnapshotError::BadMagic => f.write_str("not a kovanica ledger snapshot"),
+            LedgerSnapshotError::UnsupportedVersion(v) => {
+                write!(f, "unsupported ledger snapshot version {v}")
+            }
+            LedgerSnapshotError::Dag(e) => write!(f, "dag snapshot: {e}"),
+            LedgerSnapshotError::Payload(e) => write!(f, "payload decode: {e}"),
+            LedgerSnapshotError::Genesis(e) => write!(f, "genesis: {e}"),
+            LedgerSnapshotError::Rebuild(e) => write!(f, "replaying block: {e}"),
+            LedgerSnapshotError::Empty => f.write_str("snapshot has no genesis block"),
+        }
+    }
+}
+
+impl std::error::Error for LedgerSnapshotError {}
 
 #[cfg(test)]
 mod tests {
