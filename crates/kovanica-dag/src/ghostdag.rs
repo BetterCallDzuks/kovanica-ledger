@@ -26,13 +26,9 @@ use crate::block::BlockId;
 use crate::dag::{Dag, GhostdagData, KParam};
 
 impl Dag {
-    /// Derive GHOSTDAG data for a new block given its parents and precomputed
-    /// past set. Does not mutate the DAG.
-    pub(crate) fn compute_ghostdag(
-        &self,
-        parents: &[BlockId],
-        past: &std::collections::HashSet<BlockId>,
-    ) -> GhostdagData {
+    /// Derive GHOSTDAG data for a new block given its parents. Reachability and
+    /// the mergeset come from the oracle; does not mutate the DAG.
+    pub(crate) fn compute_ghostdag(&self, parents: &[BlockId]) -> GhostdagData {
         let selected_parent = self
             .select_parent(parents)
             .expect("non-genesis block always has at least one parent");
@@ -41,7 +37,7 @@ impl Dag {
         // exactly the blocks in the selected parent's anticone that the new block
         // merges in, in the deterministic topological order shared with the
         // linearization (see [`Dag::mergeset_ordered`]).
-        let mergeset = self.mergeset_ordered(selected_parent, past);
+        let mergeset = self.mergeset_ordered(selected_parent, parents);
         let sp_node = &self.nodes[&selected_parent];
 
         // Seed the new block's blue set with the selected parent's blue set,

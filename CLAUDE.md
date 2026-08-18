@@ -64,16 +64,16 @@ crates/
     src/
       lib.rs                   Crate docs + re-exports + a doctest quick tour
       block.rs                 Block (multi-parent vertex) and BlockId (BLAKE3 hash)
-      dag.rs                   Dag store: insert/validate, past sets, tips, GhostdagData, preview(), chain_key
+      dag.rs                   Dag store: insert/validate, oracle-backed reachability + mergeset, past_size, tips, GhostdagData, preview(), chain_key
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
       snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
       difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm)
-      reachability.rs          Reachability oracle: interval-tree + future-covering sets (verified, not yet the Dag's backing)
+      reachability.rs          Reachability oracle: interval-tree + future-covering sets (the Dag's backing for is_ancestor + mergeset)
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
-      reachability.rs          Differential: oracle is_ancestor == past-set is_ancestor over random adversarial DAGs
+      reachability.rs          Differential: Dag/oracle is_ancestor == naive parent-walk over random adversarial DAGs
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
     src/
       lib.rs                   Crate docs + re-exports + an end-to-end doctest
@@ -110,29 +110,37 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
 
 ### Deliberate first-slice simplifications (do not mistake for the final design)
 
-- **Reachability** is still answered from a per-block `past` set stored in full:
-  O(1) queries but O(n²) memory. The replacement — an interval-tree +
-  future-covering-set oracle (`reachability::Reachability`) — is implemented and
-  **differentially verified** against the `past` sets, but is not yet what `Dag`
-  uses; the cutover (incremental maintenance + interval reindexing, then dropping
-  the `past` sets, which also rewires mergeset computation and the ordering key)
-  is the follow-up. See `dag.rs` and `reachability.rs` module docs.
+- **Reachability** is answered by the interval-tree + future-covering-set oracle
+  (`reachability::Reachability`): the selected-parent tree carries DFS interval
+  labels and each block a future-covering set for the non-tree edges. This **is**
+  the `Dag`'s backing — the per-block `past` sets are gone; each block keeps only
+  its `past_size` (the ancestor *count*, all the topological sort key needs), and
+  the mergeset is recomputed by a `sp`-bounded backward walk over parent edges
+  (`Dag::mergeset_ordered`). The oracle is currently **rebuilt from scratch after
+  every insert** (an O(n²) pass); incremental maintenance with interval
+  **reindexing** is the remaining optimisation. Correctness is guarded by a
+  differential test against an independent naive parent-walk over random
+  adversarial DAGs, plus the whole consensus/ledger suite (unchanged by the
+  cutover). See `dag.rs` and `reachability.rs` module docs.
 - **In-memory working state**, with **replay-log persistence**: `Dag`/`Ledger`
   `write_snapshot`/`read_snapshot` serialise only `k`, the subsidy, and the blocks
-  in topological order; loading replays inserts so all derived state (past sets,
-  colouring, per-block UTXO state) is recomputed, never trusted from disk. There
+  in topological order; loading replays inserts so all derived state (the
+  reachability oracle, colouring, per-block UTXO state) is recomputed, never
+  trusted from disk. There
   is no incremental on-disk store or mmap yet — a snapshot is written/read whole.
 - **Linearization** is the recursive GHOSTDAG order:
   `order(B) = order(selected_parent(B)) ++ mergeset_order(B) ++ [B]`, unrolled over
   the selected chain and closed with the selected tip's anticone (the virtual
   block's mergeset). The selected chain is a subsequence and each merged block
   sits directly before its merger. Mergeset order within a block is a deterministic
-  topological sort by `(|past|, id)` — a valid GHOSTDAG-spirit order, not Kaspa's
+  topological sort by `(past_size, id)` — a valid GHOSTDAG-spirit order, not Kaspa's
   exact blue-work mergeset tiebreak. See `ordering.rs` module docs.
 - **State (`kovanica-state`)** applies transactions in GHOSTDAG order. Two views:
   `apply_dag` folds a finished DAG from scratch; `Ledger` maintains each block's
   view state incrementally from its selected parent (per-block state stored in
-  full — the same O(n²) trade-off as `past` sets). A subsidy is a single per-block
+  full — an O(n²) memory trade-off; the DAG's own `past` sets have since been
+  replaced by the reachability oracle, but the per-block UTXO state has not). A
+  subsidy is a single per-block
   constant (no halving schedule); coinbase maturity is only "not spendable in the
   same block"; there are no tx size/weight limits. `Ledger::with_finality` prunes
   the per-block state of final blocks (more than `finality_depth` blue score below
@@ -226,12 +234,13 @@ is a library plus a binary (`serve`/`demo`).
       follow the selected tip (implicit re-org, no revert).
 - [x] Persistence: replay-log snapshots of the DAG and ledger
       (`Dag`/`Ledger` `write_snapshot`/`read_snapshot`) — state recomputed on load.
-- [~] Reachability oracle (`reachability::Reachability`): interval-tree +
-      future-covering sets, built from the DAG and differentially verified against
-      the `past` sets. Cutover — making it the `Dag`'s backing (incremental
-      maintenance + interval reindexing), dropping the `past` sets, and rewiring
-      mergeset computation and the ordering key — is the follow-up; it also unlocks
-      DAG-level (not just state) pruning.
+- [x] Reachability oracle (`reachability::Reachability`): interval-tree +
+      future-covering sets, now the `Dag`'s backing for ancestor queries and
+      mergeset computation. The per-block `past` sets are dropped (each block keeps
+      only `past_size`); mergeset is a selected-parent-bounded backward walk. The
+      oracle is rebuilt after each insert; incremental maintenance with interval
+      **reindexing** (and the DAG-level pruning it unlocks) is the remaining
+      optimisation.
 - [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
 - [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
       `serve`/`demo`, snapshot-backed).

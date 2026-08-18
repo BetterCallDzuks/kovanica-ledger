@@ -111,15 +111,15 @@ impl Dag {
     fn mergeset_order(&self, block: &BlockId) -> Vec<BlockId> {
         let node = &self.nodes[block];
         match node.ghostdag.selected_parent {
-            Some(selected_parent) => self.mergeset_ordered(selected_parent, &node.past),
+            Some(selected_parent) => self.mergeset_ordered(selected_parent, node.block.parents()),
             None => Vec::new(), // genesis merges nothing
         }
     }
 
-    /// Topological sort key: `(|past|, id)`. A strict ancestor has a strictly
+    /// Topological sort key: `(past_size, id)`. A strict ancestor has a strictly
     /// smaller past, so this always orders ancestors before descendants, with the
     /// id as a deterministic final tiebreak. Used for the linearization's tail.
-    fn topo_key(&self, id: &BlockId) -> (usize, BlockId) {
-        (self.nodes[id].past.len(), *id)
+    fn topo_key(&self, id: &BlockId) -> (u64, BlockId) {
+        (self.nodes[id].past_size, *id)
     }
 }

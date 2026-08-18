@@ -6,16 +6,19 @@
 //! validated and immediately coloured, so the store always holds a fully
 //! processed DAG.
 //!
-//! ## First-slice simplifications (intentional, documented as TODO)
+//! ## Reachability
 //!
-//! * Reachability is answered from a per-block `past` set stored in full. This
-//!   is O(1) per query but O(n²) memory. A production node replaces this with a
-//!   reachability oracle (interval labels), tracked in `CLAUDE.md`.
-//! * Everything lives in memory; there is no persistence layer yet.
+//! Ancestor queries and mergeset computation go through a [`Reachability`]
+//! oracle (interval-labelled selected-parent tree + future-covering sets), so no
+//! per-block `past` set is stored — each block keeps only its `past_size` (the
+//! *count* of its ancestors), which is enough for the topological sort key. The
+//! oracle is rebuilt after every insert; incremental maintenance with interval
+//! reindexing is a further optimisation (see [`crate::reachability`]).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::block::{Block, BlockId};
+use crate::reachability::Reachability;
 use crate::validation::BlockValidator;
 
 /// Errors returned when inserting a block into the [`Dag`].
@@ -92,9 +95,11 @@ pub struct BlockPreview {
 /// A stored block: the block itself plus derived DAG/consensus data.
 pub(crate) struct Node {
     pub(crate) block: Block,
-    /// Strict ancestors of this block (its past), stored in full — see the
-    /// module docs for the memory trade-off.
-    pub(crate) past: HashSet<BlockId>,
+    /// Number of strict ancestors of this block (`|past|`). The full set is not
+    /// stored — reachability comes from the oracle — but the count is the
+    /// topological sort key and is maintained in O(1): `past_size(sp) + 1 +
+    /// |mergeset|`.
+    pub(crate) past_size: u64,
     /// Direct children, for tip maintenance and total-order traversal.
     pub(crate) children: BTreeSet<BlockId>,
     pub(crate) ghostdag: GhostdagData,
@@ -107,6 +112,9 @@ pub struct Dag {
     pub(crate) nodes: HashMap<BlockId, Node>,
     /// Blocks with no children yet — the current tips.
     tips: BTreeSet<BlockId>,
+    /// Reachability oracle backing `is_ancestor` and mergeset computation,
+    /// rebuilt after every insert.
+    reach: Reachability,
     /// Optional payload-aware validator run on each [`Dag::insert`]. See
     /// [`crate::validation`].
     validator: Option<Box<dyn BlockValidator>>,
@@ -121,7 +129,7 @@ impl Dag {
             genesis_id,
             Node {
                 block: genesis,
-                past: HashSet::new(),
+                past_size: 0,
                 children: BTreeSet::new(),
                 ghostdag: GhostdagData {
                     selected_parent: None,
@@ -135,13 +143,16 @@ impl Dag {
         );
         let mut tips = BTreeSet::new();
         tips.insert(genesis_id);
-        Self {
+        let mut dag = Self {
             k,
             genesis: genesis_id,
             nodes,
             tips,
+            reach: Reachability::empty(),
             validator: None,
-        }
+        };
+        dag.reach = Reachability::build(&dag);
+        dag
     }
 
     /// Create a DAG as [`Dag::new`] but with a [`BlockValidator`] installed, so
@@ -200,10 +211,11 @@ impl Dag {
 
     /// `true` iff `ancestor` is a strict ancestor of `descendant`
     /// (i.e. `ancestor` is in `descendant`'s past). `false` for equal ids.
+    ///
+    /// Answered by the [`Reachability`] oracle in O(1)/O(fcs) rather than from a
+    /// stored past set.
     pub fn is_ancestor(&self, ancestor: &BlockId, descendant: &BlockId) -> bool {
-        self.nodes
-            .get(descendant)
-            .is_some_and(|n| n.past.contains(ancestor))
+        self.reach.is_ancestor(ancestor, descendant)
     }
 
     /// `true` iff `a` and `b` are in each other's anticone: distinct blocks
@@ -221,20 +233,33 @@ impl Dag {
         (g.blue_work, g.blue_score, *id)
     }
 
-    /// The mergeset for a block with selected parent `sp` and past set `past`,
-    /// in deterministic topological order:
-    /// `past \ (past(sp) ∪ {sp})`, sorted by `(|past|, id)`.
+    /// The mergeset for a block with selected parent `sp` and the given `parents`,
+    /// in deterministic topological order: `past(block) \ (past(sp) ∪ {sp})`,
+    /// sorted by `(past_size, id)`.
     ///
-    /// Shared by GHOSTDAG colouring, the linearization, and [`Dag::preview`] so
-    /// all three agree on the mergeset and its order.
-    pub(crate) fn mergeset_ordered(&self, sp: BlockId, past: &HashSet<BlockId>) -> Vec<BlockId> {
-        let sp_past = &self.nodes[&sp].past;
-        let mut mergeset: Vec<BlockId> = past
-            .iter()
-            .copied()
-            .filter(|b| *b != sp && !sp_past.contains(b))
-            .collect();
-        mergeset.sort_by_key(|b| (self.nodes[b].past.len(), *b));
+    /// Computed by a backward walk over parent edges from `parents`, bounded by
+    /// `sp`'s past (a block in `past(sp) ∪ {sp}` is a boundary — not merged, and
+    /// its ancestors, all also in `past(sp)`, are not traversed). Reachability is
+    /// the oracle. Shared by GHOSTDAG colouring, the linearization, and
+    /// [`Dag::preview`] so all three agree on the mergeset and its order.
+    pub(crate) fn mergeset_ordered(&self, sp: BlockId, parents: &[BlockId]) -> Vec<BlockId> {
+        let mut mergeset: Vec<BlockId> = Vec::new();
+        let mut seen: HashSet<BlockId> = HashSet::new();
+        let mut queue: VecDeque<BlockId> = parents.iter().copied().collect();
+        while let Some(x) = queue.pop_front() {
+            if !seen.insert(x) {
+                continue;
+            }
+            if x == sp || self.is_ancestor(&x, &sp) {
+                continue; // x ∈ past(sp) ∪ {sp}: boundary
+            }
+            mergeset.push(x);
+            for parent in self.nodes[&x].block.parents() {
+                queue.push_back(*parent);
+            }
+        }
+        // Topological order: a strict ancestor has a strictly smaller past_size.
+        mergeset.sort_by_key(|b| (self.nodes[b].past_size, *b));
         mergeset
     }
 
@@ -264,12 +289,7 @@ impl Dag {
             .iter()
             .max_by_key(|p| self.chain_key(p))
             .expect("non-empty parents");
-        let mut past: HashSet<BlockId> = HashSet::new();
-        for parent in block.parents() {
-            past.insert(*parent);
-            past.extend(self.nodes[parent].past.iter().copied());
-        }
-        let mergeset = self.mergeset_ordered(selected_parent, &past);
+        let mergeset = self.mergeset_ordered(selected_parent, block.parents());
         Ok(BlockPreview {
             selected_parent,
             mergeset,
@@ -304,15 +324,17 @@ impl Dag {
                 .map_err(|reason| DagError::InvalidBlock { id, reason })?;
         }
 
-        // Past = union over parents of ({parent} ∪ past(parent)).
-        let mut past: HashSet<BlockId> = HashSet::new();
-        for parent in block.parents() {
-            past.insert(*parent);
-            past.extend(self.nodes[parent].past.iter().copied());
-        }
+        // Derive GHOSTDAG data (selected parent, mergeset, colouring) against the
+        // oracle as it stands before this block is added.
+        let ghostdag = self.compute_ghostdag(block.parents());
 
-        // Derive GHOSTDAG data (selected parent, mergeset, colouring).
-        let ghostdag = self.compute_ghostdag(block.parents(), &past);
+        // past_size(B) = past_size(sp) + 1 + |mergeset(B)| (a disjoint union).
+        let sp = ghostdag
+            .selected_parent
+            .expect("non-genesis has a selected parent");
+        let past_size = self.nodes[&sp].past_size
+            + 1
+            + (ghostdag.mergeset_blues.len() + ghostdag.mergeset_reds.len()) as u64;
 
         // Wire the block in: attach to parents, refresh tips.
         for parent in block.parents() {
@@ -325,11 +347,15 @@ impl Dag {
             id,
             Node {
                 block,
-                past,
+                past_size,
                 children: BTreeSet::new(),
                 ghostdag,
             },
         );
+
+        // Rebuild the reachability oracle to include the new block.
+        let reach = Reachability::build(self);
+        self.reach = reach;
         Ok(id)
     }
 }

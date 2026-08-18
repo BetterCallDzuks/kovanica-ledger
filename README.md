@@ -24,8 +24,10 @@ protocol behind Kaspa).
   next block should target from the timestamps + work of recent blocks, holding a
   steady block rate (the algorithm; consensus enforcement awaits block timestamps).
 - **Reachability oracle** (`reachability::Reachability`): an interval-tree +
-  future-covering-set index for O(1) ancestor queries without the O(n²) `past`
-  sets, differentially verified against them (not yet the DAG's backing store).
+  future-covering-set index for O(1) ancestor queries — now the DAG's backing for
+  ancestor and mergeset computation, so the O(n²) per-block `past` sets are gone
+  (each block keeps only its `past_size` count). Rebuilt after each insert;
+  differentially verified against an independent naive parent-walk.
 
 `crates/kovanica-state` — the UTXO ledger:
 

@@ -1,7 +1,10 @@
-//! Differential tests for the reachability oracle: on many DAGs — structured and
-//! randomly generated adversarial ones — the oracle must agree with the DAG's
-//! existing `past`-set reachability for *every* ordered pair of blocks, and its
+//! Differential tests for the reachability oracle (now the DAG's backing for
+//! `is_ancestor`): on many DAGs — structured and randomly generated adversarial
+//! ones — the oracle must agree with an **independent** ground truth (a naive
+//! backward walk over parent edges) for *every* ordered pair of blocks, and its
 //! chain-ancestor answer must match walking selected parents.
+
+use std::collections::{HashSet, VecDeque};
 
 use kovanica_dag::{Block, BlockId, Dag, Reachability};
 
@@ -53,6 +56,28 @@ fn random_dag(seed: u64, n: usize, k: u16) -> (Dag, Vec<BlockId>) {
     (dag, ids)
 }
 
+/// Independent ground truth: is `a` a strict DAG-ancestor of `b`? Naive backward
+/// BFS over parent edges (this is what the oracle must reproduce).
+fn naive_is_ancestor(dag: &Dag, a: &BlockId, b: &BlockId) -> bool {
+    if a == b {
+        return false;
+    }
+    let mut seen: HashSet<BlockId> = HashSet::new();
+    let mut queue: VecDeque<BlockId> = dag.block(b).unwrap().parents().iter().copied().collect();
+    while let Some(x) = queue.pop_front() {
+        if x == *a {
+            return true;
+        }
+        if !seen.insert(x) {
+            continue;
+        }
+        for parent in dag.block(&x).unwrap().parents() {
+            queue.push_back(*parent);
+        }
+    }
+    false
+}
+
 /// Reference: is `a` a strict selected-parent (chain) ancestor of `b`?
 fn walk_chain_ancestor(dag: &Dag, a: &BlockId, b: &BlockId) -> bool {
     if a == b {
@@ -68,15 +93,18 @@ fn walk_chain_ancestor(dag: &Dag, a: &BlockId, b: &BlockId) -> bool {
     false
 }
 
-/// Assert the oracle agrees with the DAG on every ordered pair.
+/// Assert the oracle (via both `Dag::is_ancestor` and a freshly-built
+/// `Reachability`) agrees with the naive ground truth on every ordered pair.
 fn assert_oracle_matches(dag: &Dag, ids: &[BlockId]) {
     let oracle = Reachability::build(dag);
     for a in ids {
         for b in ids {
+            let truth = naive_is_ancestor(dag, a, b);
+            assert_eq!(dag.is_ancestor(a, b), truth, "Dag::is_ancestor ({a}, {b})");
             assert_eq!(
                 oracle.is_ancestor(a, b),
-                dag.is_ancestor(a, b),
-                "is_ancestor mismatch for ({a}, {b})"
+                truth,
+                "oracle.is_ancestor ({a}, {b})"
             );
             assert_eq!(
                 oracle.is_chain_ancestor(a, b),

@@ -22,13 +22,14 @@
 //!
 //! ## Status
 //!
-//! This is built from the DAG's public structure and is **verified against the
-//! existing `past`-set reachability** by a differential test over many random
-//! adversarial DAGs (see `tests/reachability.rs`). It does not yet replace the
-//! `past` sets — the build is a straightforward O(n²) pass and the sets are
-//! still what `Dag` uses. Swapping `Dag` over to the oracle (incremental
-//! maintenance with interval reindexing, and dropping the `past` sets) is the
-//! follow-up this proves correct first.
+//! This **is** what [`Dag`] uses for `is_ancestor` and mergeset computation — the
+//! per-block `past` sets are gone; each block keeps only its `past_size` count.
+//! The oracle is rebuilt from scratch after every insert (a straightforward
+//! O(n²) pass); incremental maintenance with interval **reindexing** is a further
+//! optimisation. Correctness is guarded by a differential test that checks
+//! `Dag::is_ancestor` against an independent naive parent-walk over many random
+//! adversarial DAGs (see `tests/reachability.rs`), plus the whole consensus/ledger
+//! suite, which is unchanged by the cutover.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -47,24 +48,31 @@ pub struct Reachability {
 }
 
 impl Reachability {
-    /// Build the oracle from `dag`, using only its public structure (the blocks,
-    /// their parents, and their GHOSTDAG selected parents).
-    pub fn build(dag: &Dag) -> Self {
-        let order = dag.linearize(); // topological: genesis first, parents before children
+    /// An empty oracle (no blocks). Used only to seed a [`Dag`] before the first
+    /// [`Reachability::build`].
+    pub(crate) fn empty() -> Self {
+        Self {
+            intervals: HashMap::new(),
+            fcs: HashMap::new(),
+        }
+    }
 
+    /// Build the oracle from `dag`'s structure (the blocks, their parents, and
+    /// their GHOSTDAG selected parents).
+    ///
+    /// This iterates the DAG's nodes directly rather than calling `linearize()`,
+    /// which — now that the DAG is oracle-backed — would recurse into the oracle
+    /// being built.
+    pub fn build(dag: &Dag) -> Self {
         // Reachability tree = selected-parent tree. Collect tree children.
         let mut tree_children: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
         // DAG children = inverse of parents (for walking futures).
         let mut dag_children: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-        for id in &order {
-            if let Some(sp) = dag.ghostdag(id).and_then(|g| g.selected_parent) {
+        for (id, node) in &dag.nodes {
+            if let Some(sp) = node.ghostdag.selected_parent {
                 tree_children.entry(sp).or_default().push(*id);
             }
-            for parent in dag
-                .block(id)
-                .expect("id from linearize is present")
-                .parents()
-            {
+            for parent in node.block.parents() {
                 dag_children.entry(*parent).or_default().push(*id);
             }
         }
@@ -74,7 +82,7 @@ impl Reachability {
         }
 
         let intervals = label_intervals(dag.genesis(), &tree_children);
-        let fcs = build_fcs(&order, dag, &dag_children, &intervals);
+        let fcs = build_fcs(dag, &dag_children, &intervals);
 
         Self { intervals, fcs }
     }
@@ -152,7 +160,6 @@ fn label_intervals(
 
 /// For each block, the tree-roots of `future(block) \ subtree(block)`.
 fn build_fcs(
-    order: &[BlockId],
     dag: &Dag,
     dag_children: &HashMap<BlockId, Vec<BlockId>>,
     intervals: &HashMap<BlockId, (u64, u64)>,
@@ -165,7 +172,7 @@ fn build_fcs(
     };
 
     let mut fcs: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-    for a in order {
+    for a in dag.nodes.keys() {
         // future(a) = everything reachable forward over DAG child edges, minus a.
         let mut future: HashSet<BlockId> = HashSet::new();
         let mut queue: VecDeque<BlockId> = VecDeque::new();
@@ -188,7 +195,7 @@ fn build_fcs(
             .copied()
             .filter(|c| !subtree_contains(a, c))
             .filter(|c| {
-                let tree_parent = dag.ghostdag(c).and_then(|g| g.selected_parent);
+                let tree_parent = dag.nodes[c].ghostdag.selected_parent;
                 match tree_parent {
                     // Root of the candidate set iff its tree parent is not also a
                     // candidate (either in a's subtree, or not in a's future).
