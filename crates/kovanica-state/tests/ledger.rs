@@ -24,14 +24,14 @@ fn dag_funding(owner: &KeyPair, funding: u64) -> (Dag, BlockId, OutPoint) {
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
-    let genesis = Block::genesis(1, encode_block_payload(&[coinbase]));
+    let genesis = Block::genesis(1, 0, encode_block_payload(&[coinbase]));
     let genesis_id = genesis.id();
     (Dag::new(3, genesis), genesis_id, coin)
 }
 
 /// A block carrying exactly the given transactions on the given parents.
 fn tx_block(parents: &[BlockId], txs: &[Transaction]) -> Block {
-    Block::new(parents.to_vec(), 1, encode_block_payload(txs))
+    Block::new(parents.to_vec(), 1, 0, encode_block_payload(txs))
 }
 
 /// A canonical, order-independent snapshot of a UTXO set for equality checks.

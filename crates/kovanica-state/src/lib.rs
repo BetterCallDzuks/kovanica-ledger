@@ -46,7 +46,7 @@
 //! // Genesis carries a coinbase that mints 100 to the miner (subsidy = 100).
 //! let genesis_cb = Transaction::coinbase(vec![TxOutput::new(100, miner.address())], b"genesis".to_vec());
 //! let genesis_cb_id = genesis_cb.id();
-//! let genesis = Block::genesis(1, encode_block_payload(&[genesis_cb]));
+//! let genesis = Block::genesis(1, 0, encode_block_payload(&[genesis_cb]));
 //! let genesis_id = genesis.id();
 //! let mut dag = Dag::new(3, genesis);
 //!
@@ -54,13 +54,13 @@
 //! let coin = OutPoint::new(genesis_cb_id, 0);
 //! let to_alice = Transaction::signed(&[(coin, &miner)], vec![TxOutput::new(70, alice.address())], vec![]);
 //! let to_alice_id = to_alice.id();
-//! let b1 = Block::new(vec![genesis_id], 1, encode_block_payload(&[to_alice]));
+//! let b1 = Block::new(vec![genesis_id], 1, 1, encode_block_payload(&[to_alice]));
 //! let b1_id = dag.insert(b1).unwrap();
 //!
 //! // Block 2: Alice forwards 70 to Bob.
 //! let alice_coin = OutPoint::new(to_alice_id, 0);
 //! let to_bob = Transaction::signed(&[(alice_coin, &alice)], vec![TxOutput::new(70, bob.address())], vec![]);
-//! dag.insert(Block::new(vec![b1_id], 1, encode_block_payload(&[to_bob]))).unwrap();
+//! dag.insert(Block::new(vec![b1_id], 1, 2, encode_block_payload(&[to_bob]))).unwrap();
 //!
 //! // Apply the whole DAG in GHOSTDAG order (subsidy = 100 per block).
 //! let run = apply_dag(&dag, 100);

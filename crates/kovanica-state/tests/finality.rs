@@ -33,7 +33,7 @@ fn old_block_states_are_pruned_below_the_finality_point() {
     let mut ids = vec![ledger.genesis()];
     for _ in 0..10 {
         let parent = *ids.last().unwrap();
-        ids.push(ledger.insert(vec![parent], 1, &[]).unwrap());
+        ids.push(ledger.insert(vec![parent], 1, 0, &[]).unwrap());
     }
 
     let tip = ledger.dag().selected_tip();
@@ -67,10 +67,10 @@ fn building_on_final_history_is_rejected() {
     // (now final) block. The insert is a finality violation and adds nothing.
     let (mut ledger, coin) = funded(2, 500);
     let genesis = ledger.genesis();
-    let early = ledger.insert(vec![genesis], 1, &[]).unwrap();
+    let early = ledger.insert(vec![genesis], 1, 0, &[]).unwrap();
     let mut tip = early;
     for _ in 0..8 {
-        tip = ledger.insert(vec![tip], 1, &[]).unwrap();
+        tip = ledger.insert(vec![tip], 1, 0, &[]).unwrap();
     }
     let early_score = ledger.dag().ghostdag(&early).unwrap().blue_score;
     assert!(ledger.finality_score() > early_score, "early is now final");
@@ -83,7 +83,7 @@ fn building_on_final_history_is_rejected() {
         vec![TxOutput::new(500, KeyPair::from_u64(2).address())],
         vec![],
     );
-    let err = ledger.insert(vec![early], 1, &[tx]).unwrap_err();
+    let err = ledger.insert(vec![early], 1, 0, &[tx]).unwrap_err();
     assert!(
         matches!(err, LedgerInsertError::Finality { .. }),
         "got {err:?}"
@@ -91,7 +91,7 @@ fn building_on_final_history_is_rejected() {
     assert_eq!(ledger.dag().len(), before, "no rejected block was added");
 
     // Building on the tip (non-final) still works.
-    assert!(ledger.insert(vec![tip], 1, &[]).is_ok());
+    assert!(ledger.insert(vec![tip], 1, 0, &[]).is_ok());
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn unbounded_ledger_never_prunes() {
     let (mut ledger, _coin) = funded(u64::MAX, 500);
     let mut tip = ledger.genesis();
     for _ in 0..10 {
-        tip = ledger.insert(vec![tip], 1, &[]).unwrap();
+        tip = ledger.insert(vec![tip], 1, 0, &[]).unwrap();
     }
     assert_eq!(ledger.finality_score(), 0);
     for id in ledger.dag().linearize() {
@@ -123,7 +123,7 @@ fn reorg_above_finality_follows_the_heavier_branch() {
         vec![TxOutput::new(500, bob.address())],
         b"bob".to_vec(),
     );
-    let a = ledger.insert(vec![genesis], 1, &[to_bob]).unwrap();
+    let a = ledger.insert(vec![genesis], 1, 0, &[to_bob]).unwrap();
     assert_eq!(ledger.dag().selected_tip(), a);
     assert_eq!(ledger.ledger_state().balance(&bob.address()), 500);
 
@@ -135,8 +135,8 @@ fn reorg_above_finality_follows_the_heavier_branch() {
         vec![TxOutput::new(500, carol.address())],
         b"carol".to_vec(),
     );
-    let h1 = ledger.insert(vec![genesis], 100, &[to_carol]).unwrap();
-    let h2 = ledger.insert(vec![h1], 1, &[]).unwrap();
+    let h1 = ledger.insert(vec![genesis], 100, 0, &[to_carol]).unwrap();
+    let h2 = ledger.insert(vec![h1], 1, 0, &[]).unwrap();
 
     assert_eq!(ledger.dag().selected_tip(), h2, "heavier branch selected");
     // The current state now reflects the heavy branch; the light spend lost.

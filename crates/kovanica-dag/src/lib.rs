@@ -24,15 +24,15 @@
 //! use kovanica_dag::{Block, Dag};
 //!
 //! // k = 3 tolerates a blue anticone of up to 3 parallel blocks.
-//! let genesis = Block::genesis(1, b"kovanica-genesis".to_vec());
+//! let genesis = Block::genesis(1, 0, b"kovanica-genesis".to_vec());
 //! let genesis_id = genesis.id();
 //! let mut dag = Dag::new(3, genesis);
 //!
 //! // Two blocks build in parallel on genesis …
-//! let a = dag.insert(Block::new(vec![genesis_id], 1, b"a".to_vec())).unwrap();
-//! let b = dag.insert(Block::new(vec![genesis_id], 1, b"b".to_vec())).unwrap();
+//! let a = dag.insert(Block::new(vec![genesis_id], 1, 1, b"a".to_vec())).unwrap();
+//! let b = dag.insert(Block::new(vec![genesis_id], 1, 1, b"b".to_vec())).unwrap();
 //! // … then a third merges them, referencing both tips.
-//! let c = dag.insert(Block::new(vec![a, b], 1, b"c".to_vec())).unwrap();
+//! let c = dag.insert(Block::new(vec![a, b], 1, 2, b"c".to_vec())).unwrap();
 //!
 //! // With k = 3, the two parallel blocks are both blue.
 //! assert_eq!(dag.ghostdag(&c).unwrap().blue_score, 3); // genesis + a + b

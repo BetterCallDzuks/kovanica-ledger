@@ -11,13 +11,26 @@
 
 use std::fs;
 
-use kovanica_dag::{BlockId, DagError};
+use kovanica_dag::{BlockId, Dag, DagError};
 use kovanica_state::{
     apply_block, decode_block_payload, Address, KeyPair, Ledger, LedgerError, LedgerInsertError,
     OutPoint, Transaction, TxId, TxOutput,
 };
 
 use crate::mempool::Mempool;
+
+/// The timestamp to stamp on a new block built on `parents`: one millisecond
+/// after the latest parent (genesis is at 0). This is a deterministic,
+/// strictly-monotone logical clock — no wall-clock dependency, so node
+/// behaviour stays reproducible — and it satisfies the difficulty layer's
+/// "not older than any parent" rule (see [`kovanica_dag::Dag::set_difficulty`]).
+fn next_timestamp(dag: &Dag, parents: &[BlockId]) -> u64 {
+    parents
+        .iter()
+        .filter_map(|p| dag.block(p).map(|b| b.timestamp_ms()))
+        .max()
+        .map_or(0, |latest| latest + 1)
+}
 
 /// Why a node operation failed.
 #[derive(Debug)]
@@ -78,6 +91,8 @@ pub struct BlockRecord {
     pub parents: Vec<BlockId>,
     /// The block's work weight.
     pub work: u128,
+    /// The block's timestamp, in milliseconds.
+    pub timestamp_ms: u64,
     /// The block's transactions.
     pub txs: Vec<Transaction>,
 }
@@ -202,8 +217,10 @@ impl Node {
         let tx_id = tx.id();
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let parents = ledger.dag().tips();
+        let timestamp = next_timestamp(ledger.dag(), &parents);
+        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
         let block = ledger
-            .insert(parents, 1, &[tx])
+            .insert(parents, work, timestamp, &[tx])
             .map_err(NodeError::Insert)?;
         Ok(Sent { block, tx: tx_id })
     }
@@ -262,8 +279,10 @@ impl Node {
 
         let ledger = self.ledger.as_mut().expect("checked above");
         let parents = ledger.dag().tips();
+        let timestamp = next_timestamp(ledger.dag(), &parents);
+        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
         let block = ledger
-            .insert(parents, 1, &selected)
+            .insert(parents, work, timestamp, &selected)
             .map_err(NodeError::Insert)?;
         self.mempool.remove_all(&selected_ids);
         Ok(Some(block))
@@ -277,6 +296,7 @@ impl Node {
         Some(BlockRecord {
             parents: block.parents().to_vec(),
             work: block.work(),
+            timestamp_ms: block.timestamp_ms(),
             txs,
         })
     }
@@ -303,7 +323,12 @@ impl Node {
     /// present (feed records in topological order).
     pub fn receive_block(&mut self, record: BlockRecord) -> Result<BlockId, NodeError> {
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
-        match ledger.insert(record.parents, record.work, &record.txs) {
+        match ledger.insert(
+            record.parents,
+            record.work,
+            record.timestamp_ms,
+            &record.txs,
+        ) {
             Ok(id) => Ok(id),
             Err(LedgerInsertError::Dag(DagError::DuplicateBlock(id))) => Ok(id),
             Err(e) => Err(NodeError::Insert(e)),

@@ -41,7 +41,7 @@ fn build_ledger() -> Ledger {
     );
     let bob_coin = OutPoint::new(a_to_b.id(), 0);
     let alice_change = OutPoint::new(a_to_b.id(), 1);
-    let b1 = ledger.insert(vec![genesis], 1, &[a_to_b]).unwrap();
+    let b1 = ledger.insert(vec![genesis], 1, 0, &[a_to_b]).unwrap();
 
     // bob → carol (300) on b1.
     let b_to_c = Transaction::signed(
@@ -49,7 +49,7 @@ fn build_ledger() -> Ledger {
         vec![TxOutput::new(300, carol.address())],
         Vec::new(),
     );
-    let b2 = ledger.insert(vec![b1], 1, &[b_to_c]).unwrap();
+    let b2 = ledger.insert(vec![b1], 1, 0, &[b_to_c]).unwrap();
 
     // Parallel side block off b1: alice spends her change to carol.
     let side = Transaction::signed(
@@ -57,10 +57,10 @@ fn build_ledger() -> Ledger {
         vec![TxOutput::new(200, carol.address())],
         b"side".to_vec(),
     );
-    let side_block = ledger.insert(vec![b1], 1, &[side]).unwrap();
+    let side_block = ledger.insert(vec![b1], 1, 0, &[side]).unwrap();
 
     // Merge the two tips (heavier work to make the merge the selected tip).
-    ledger.insert(vec![b2, side_block], 5, &[]).unwrap();
+    ledger.insert(vec![b2, side_block], 5, 0, &[]).unwrap();
     ledger
 }
 

@@ -3,8 +3,8 @@
 //! The snapshot is a **replay log**, not a dump of derived state. It stores only
 //! the GHOSTDAG parameter `k` and the blocks themselves, in a topological order
 //! (genesis first, every block after its parents). Loading replays the blocks
-//! through [`Dag::insert`], so all consensus data — past sets, colouring, blue
-//! scores, tips — is recomputed deterministically and the rebuilt DAG is
+//! through [`Dag::insert`], so all consensus data — the reachability oracle,
+//! colouring, blue scores, tips — is recomputed deterministically and the rebuilt DAG is
 //! identical to the original. Nothing derived is trusted from disk, which keeps
 //! the format small and immune to consensus-logic changes: a snapshot written by
 //! one version reloads correctly under any version with the same insert rules.
@@ -12,11 +12,11 @@
 //! ```
 //! use kovanica_dag::{Block, Dag};
 //!
-//! let genesis = Block::genesis(1, b"genesis".to_vec());
+//! let genesis = Block::genesis(1, 0, b"genesis".to_vec());
 //! let mut dag = Dag::new(3, genesis);
 //! let g = dag.genesis();
-//! let a = dag.insert(Block::new(vec![g], 1, b"a".to_vec())).unwrap();
-//! dag.insert(Block::new(vec![a], 1, b"b".to_vec())).unwrap();
+//! let a = dag.insert(Block::new(vec![g], 1, 1, b"a".to_vec())).unwrap();
+//! dag.insert(Block::new(vec![a], 1, 2, b"b".to_vec())).unwrap();
 //!
 //! let bytes = dag.write_snapshot();
 //! let restored = Dag::read_snapshot(&bytes).unwrap();
@@ -32,7 +32,8 @@ use crate::dag::{Dag, DagError, KParam};
 /// Magic prefix identifying a Kovanica DAG snapshot (`"KVDG"`).
 const MAGIC: [u8; 4] = *b"KVDG";
 /// Snapshot format version. Bump on any incompatible framing change.
-const VERSION: u16 = 1;
+/// v2 added the per-block `timestamp_ms` field.
+const VERSION: u16 = 2;
 
 /// Why a snapshot could not be decoded or replayed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,8 +118,9 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<DagSnapshot, SnapshotError> {
         return Err(SnapshotError::UnsupportedVersion(version));
     }
     let k = reader.read_u16()?;
-    // Each block is at least 8 (parents len) + 16 (work) + 8 (payload len) = 32.
-    let count = reader.read_count(32)?;
+    // Each block is at least 8 (parents len) + 16 (work) + 8 (timestamp) +
+    // 8 (payload len) = 40.
+    let count = reader.read_count(40)?;
     let mut blocks = Vec::with_capacity(count);
     for _ in 0..count {
         blocks.push(reader.read_block()?);
@@ -129,14 +131,16 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<DagSnapshot, SnapshotError> {
     Ok(DagSnapshot { k, blocks })
 }
 
-/// Encode a block's reconstruction data: parents, work, payload (length-prefixed,
-/// little-endian). Not the id encoding — this is what rebuilds the `Block`.
+/// Encode a block's reconstruction data: parents, work, timestamp, payload
+/// (length-prefixed, little-endian). Not the id encoding — this is what rebuilds
+/// the `Block`.
 fn encode_block(block: &Block, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&(block.parents().len() as u64).to_le_bytes());
     for parent in block.parents() {
         buf.extend_from_slice(parent.as_bytes());
     }
     buf.extend_from_slice(&block.work().to_le_bytes());
+    buf.extend_from_slice(&block.timestamp_ms().to_le_bytes());
     buf.extend_from_slice(&(block.payload().len() as u64).to_le_bytes());
     buf.extend_from_slice(block.payload());
 }
@@ -204,11 +208,12 @@ impl<'a> Reader<'a> {
             parents.push(BlockId::from_bytes(self.read_array::<32>()?));
         }
         let work = self.read_u128()?;
+        let timestamp_ms = self.read_u64()?;
         let payload_len = self.read_count(1)?;
         let payload = self.read_bytes(payload_len)?;
         // Block::new de-duplicates and sorts parents; the stored ids already are,
         // so the reconstructed block's id matches the original.
-        Ok(Block::new(parents, work, payload))
+        Ok(Block::new(parents, work, timestamp_ms, payload))
     }
 }
 
@@ -217,13 +222,17 @@ mod tests {
     use super::*;
 
     fn build() -> Dag {
-        let genesis = Block::genesis(1, b"kovanica-genesis".to_vec());
+        let genesis = Block::genesis(1, 0, b"kovanica-genesis".to_vec());
         let mut dag = Dag::new(2, genesis);
         let g = dag.genesis();
-        let a = dag.insert(Block::new(vec![g], 1, b"a".to_vec())).unwrap();
-        let b = dag.insert(Block::new(vec![g], 1, b"b".to_vec())).unwrap();
+        let a = dag
+            .insert(Block::new(vec![g], 1, 1, b"a".to_vec()))
+            .unwrap();
+        let b = dag
+            .insert(Block::new(vec![g], 1, 1, b"b".to_vec()))
+            .unwrap();
         let _m = dag
-            .insert(Block::new(vec![a, b], 3, b"m".to_vec()))
+            .insert(Block::new(vec![a, b], 3, 2, b"m".to_vec()))
             .unwrap();
         dag
     }
@@ -249,7 +258,7 @@ mod tests {
 
     #[test]
     fn genesis_only_roundtrips() {
-        let dag = Dag::new(1, Block::genesis(5, b"only".to_vec()));
+        let dag = Dag::new(1, Block::genesis(5, 0, b"only".to_vec()));
         let restored = Dag::read_snapshot(&dag.write_snapshot()).unwrap();
         assert_eq!(restored.linearize(), dag.linearize());
         assert_eq!(restored.k(), 1);

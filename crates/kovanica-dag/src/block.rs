@@ -48,38 +48,47 @@ impl fmt::Display for BlockId {
 
 /// A block: a vertex of the DAG.
 ///
-/// Consensus (GHOSTDAG) only interprets `parents` and `work`; `payload` is
-/// opaque bytes (transactions, in a full ledger) and only affects the id.
+/// Consensus (GHOSTDAG) interprets `parents`, `work`, and `timestamp_ms`
+/// (the last two feed difficulty retargeting and its enforcement — see
+/// [`crate::difficulty`]); `payload` is opaque bytes (transactions, in a full
+/// ledger) and only affects the id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     /// Ids of the parent blocks this block references. Empty only for genesis.
     parents: Vec<BlockId>,
     /// The block's own work/difficulty weight; contributes to blue work.
     work: u128,
+    /// The block's timestamp, in milliseconds. Used by difficulty retargeting
+    /// and, where enforced, must not precede any parent's timestamp.
+    timestamp_ms: u64,
     /// Opaque application payload; not interpreted by consensus.
     payload: Vec<u8>,
 }
 
 impl Block {
-    /// Create a block referencing `parents` with the given `work` and `payload`.
+    /// Create a block referencing `parents` with the given `work`,
+    /// `timestamp_ms`, and `payload`.
     ///
     /// Parents are de-duplicated and sorted so the id is independent of the
     /// order in which a miner happened to list them.
-    pub fn new(mut parents: Vec<BlockId>, work: u128, payload: Vec<u8>) -> Self {
+    pub fn new(mut parents: Vec<BlockId>, work: u128, timestamp_ms: u64, payload: Vec<u8>) -> Self {
         parents.sort_unstable();
         parents.dedup();
         Self {
             parents,
             work,
+            timestamp_ms,
             payload,
         }
     }
 
-    /// The canonical genesis block: no parents, the given work and payload.
-    pub fn genesis(work: u128, payload: Vec<u8>) -> Self {
+    /// The canonical genesis block: no parents, the given work, timestamp, and
+    /// payload.
+    pub fn genesis(work: u128, timestamp_ms: u64, payload: Vec<u8>) -> Self {
         Self {
             parents: Vec::new(),
             work,
+            timestamp_ms,
             payload,
         }
     }
@@ -94,6 +103,11 @@ impl Block {
         self.work
     }
 
+    /// The block's timestamp, in milliseconds.
+    pub fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
     /// The opaque application payload.
     pub fn payload(&self) -> &[u8] {
         &self.payload
@@ -102,9 +116,9 @@ impl Block {
     /// Deterministic BLAKE3 id over the canonical encoding.
     ///
     /// Encoding (all integers little-endian): `parents.len()` as u64, each
-    /// parent's 32 bytes in sorted order, `work` as u128, `payload.len()` as
-    /// u64, then the payload bytes. Length prefixes make the encoding
-    /// unambiguous (no two distinct blocks share an encoding).
+    /// parent's 32 bytes in sorted order, `work` as u128, `timestamp_ms` as u64,
+    /// `payload.len()` as u64, then the payload bytes. Length prefixes make the
+    /// encoding unambiguous (no two distinct blocks share an encoding).
     pub fn id(&self) -> BlockId {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&(self.parents.len() as u64).to_le_bytes());
@@ -112,6 +126,7 @@ impl Block {
             hasher.update(parent.as_bytes());
         }
         hasher.update(&self.work.to_le_bytes());
+        hasher.update(&self.timestamp_ms.to_le_bytes());
         hasher.update(&(self.payload.len() as u64).to_le_bytes());
         hasher.update(&self.payload);
         BlockId(*hasher.finalize().as_bytes())
@@ -124,23 +139,31 @@ mod tests {
 
     #[test]
     fn id_is_deterministic() {
-        let b = Block::new(vec![], 1, b"a".to_vec());
+        let b = Block::new(vec![], 1, 0, b"a".to_vec());
         assert_eq!(b.id(), b.id());
     }
 
     #[test]
     fn id_independent_of_parent_order() {
-        let p1 = Block::genesis(1, b"p1".to_vec()).id();
-        let p2 = Block::new(vec![p1], 1, b"p2".to_vec()).id();
-        let a = Block::new(vec![p1, p2], 1, b"c".to_vec());
-        let b = Block::new(vec![p2, p1], 1, b"c".to_vec());
+        let p1 = Block::genesis(1, 0, b"p1".to_vec()).id();
+        let p2 = Block::new(vec![p1], 1, 1, b"p2".to_vec()).id();
+        let a = Block::new(vec![p1, p2], 1, 2, b"c".to_vec());
+        let b = Block::new(vec![p2, p1], 1, 2, b"c".to_vec());
         assert_eq!(a.id(), b.id());
     }
 
     #[test]
     fn distinct_payload_distinct_id() {
-        let a = Block::new(vec![], 1, b"a".to_vec());
-        let b = Block::new(vec![], 1, b"b".to_vec());
+        let a = Block::new(vec![], 1, 0, b"a".to_vec());
+        let b = Block::new(vec![], 1, 0, b"b".to_vec());
         assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn distinct_timestamp_distinct_id() {
+        let a = Block::new(vec![], 1, 10, b"a".to_vec());
+        let b = Block::new(vec![], 1, 11, b"a".to_vec());
+        assert_ne!(a.id(), b.id());
+        assert_eq!(a.timestamp_ms(), 10);
     }
 }

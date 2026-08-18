@@ -44,7 +44,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use kovanica_dag::{decode_snapshot, Block, BlockId, Dag, DagError, KParam, SnapshotError};
+use kovanica_dag::{
+    decode_snapshot, Block, BlockId, Dag, DagError, KParam, Retarget, SnapshotError,
+};
 
 use crate::keys::verify;
 use crate::tx::{
@@ -413,7 +415,7 @@ impl Ledger {
         let mut state = UtxoSet::new();
         apply_block(&mut state, genesis_txs, subsidy)?;
 
-        let genesis = Block::genesis(1, encode_block_payload(genesis_txs));
+        let genesis = Block::genesis(1, 0, encode_block_payload(genesis_txs));
         let genesis_id = genesis.id();
         let dag = Dag::with_validator(k, genesis, Box::new(TxStructureValidator));
 
@@ -446,6 +448,14 @@ impl Ledger {
     /// `linearize`, `selected_chain`, …).
     pub fn dag(&self) -> &Dag {
         &self.dag
+    }
+
+    /// Enable consensus-enforced difficulty on the underlying DAG with policy
+    /// `retarget`: every subsequent [`Ledger::insert`] additionally requires the
+    /// block's `work` to equal [`Dag::next_work_target`] and its timestamp not to
+    /// precede any parent's. See [`Dag::set_difficulty`].
+    pub fn set_difficulty(&mut self, retarget: Retarget) {
+        self.dag.set_difficulty(retarget);
     }
 
     /// The finality depth (blue score below the selected tip). `u64::MAX` means
@@ -481,7 +491,8 @@ impl Ledger {
         self.states.get(block)
     }
 
-    /// Insert a block referencing `parents`, carrying `work` and `txs`.
+    /// Insert a block referencing `parents`, carrying `work`, `timestamp_ms`,
+    /// and `txs`.
     ///
     /// Validates `txs` against the block's view UTXO state and, on success, adds
     /// the block to the DAG and stores its per-block state. On any error the
@@ -490,9 +501,10 @@ impl Ledger {
         &mut self,
         parents: Vec<BlockId>,
         work: u128,
+        timestamp_ms: u64,
         txs: &[Transaction],
     ) -> Result<BlockId, LedgerInsertError> {
-        let block = Block::new(parents, work, encode_block_payload(txs));
+        let block = Block::new(parents, work, timestamp_ms, encode_block_payload(txs));
 
         // Build the block's view pre-state: its selected parent's state with the
         // mergeset blocks' transactions applied in order. Previewing gets the
@@ -642,7 +654,12 @@ impl Ledger {
             let txs =
                 decode_block_payload(block.payload()).map_err(LedgerSnapshotError::Payload)?;
             ledger
-                .insert(block.parents().to_vec(), block.work(), &txs)
+                .insert(
+                    block.parents().to_vec(),
+                    block.work(),
+                    block.timestamp_ms(),
+                    &txs,
+                )
                 .map_err(LedgerSnapshotError::Rebuild)?;
         }
         Ok(ledger)
