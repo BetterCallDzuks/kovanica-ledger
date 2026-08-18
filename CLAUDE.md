@@ -12,9 +12,11 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > Difficulty is both an algorithm (`kovanica-dag::difficulty`) and, now,
 > **consensus-enforced**: blocks carry a `timestamp`, and an opt-in policy
 > (`Dag::set_difficulty`) requires each block's `work` to equal the target its
-> past implies and its timestamp not to precede any parent's. Still **TODO**
-> (below): continuous p2p gossip with peer discovery, and a wall-clock
-> future-time bound on timestamps (node policy, not a pure function of the DAG).
+> past implies and its timestamp not to precede any parent's. Separately, the
+> **node** now enforces a wall-clock future-time bound on block timestamps
+> (`Node::receive_block` rejects a block dated more than two hours ahead of the
+> local clock) — deliberately node policy, not a pure function of the DAG. Still
+> **TODO** (below): continuous p2p gossip with peer discovery.
 > Keep this file in sync with the code: update it in the same change that adds or
 > moves the structure it describes.
 
@@ -105,6 +107,7 @@ crates/
       rpc.rs                   Integration: end-to-end transfers, errors, snapshot round-trip via RPC
       mempool.rs               Integration: pool/produce assembly, conflict partial-inclusion
       network.rs               Integration: multi-node convergence (in-process + conflict + TCP loopback)
+      timestamps.rs            Integration: wall-clock timestamp policy (pinned clock, monotone stamps, far-future reject)
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): continuous p2p
@@ -171,9 +174,13 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   to precede any parent's. Genesis is exempt. `Ledger::set_difficulty` threads the
   same switch through the state layer, and the node mines produced blocks to
   `next_work_target` when it is set. Enforcement is **opt-in**, so a DAG built
-  without it accepts any `work`, exactly as before. Not enforced: a wall-clock
-  "not too far in the future" bound on timestamps — that is node policy, not a
-  pure function of the DAG, and remains a follow-up.
+  without it accepts any `work`, exactly as before. The wall-clock "not too far
+  in the future" bound on timestamps is *not* here — that is node policy, not a
+  pure function of the DAG. It lives in `kovanica-node` (`Node::receive_block`
+  rejects a block whose `timestamp_ms` exceeds the node's clock by more than
+  `MAX_FUTURE_DRIFT_MS` = 2h); the node's clock is injectable (`Node::set_now_ms`)
+  so production timestamps and the bound are deterministic in tests, and produced
+  blocks now stamp wall-clock now clamped monotone above their parents.
 
 ## 4. Build, test & run
 
@@ -269,5 +276,10 @@ is a library plus a binary (`serve`/`demo`).
       validating each block's `work` against `Dag::next_work_target` (the retarget
       over the selected-parent chain — a pure function of the DAG) and its
       timestamp against its parents'. Threaded through `Ledger::set_difficulty` and
-      the node's miner. A wall-clock future-time bound on timestamps (node policy,
-      not pure-DAG) remains a follow-up.
+      the node's miner.
+- [x] Wall-clock future-time bound on block timestamps (**node policy**, not
+      pure-DAG): `Node::receive_block` rejects a block whose `timestamp_ms` is more
+      than `MAX_FUTURE_DRIFT_MS` (2h) ahead of the node's clock. The clock is
+      injectable (`Node::set_now_ms`) for deterministic tests; produced blocks
+      stamp wall-clock now clamped monotone above their parents
+      (`crates/kovanica-node/tests/timestamps.rs`).

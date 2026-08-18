@@ -10,6 +10,7 @@
 //! runnable, self-contained demo of the whole stack.
 
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::{BlockId, Dag, DagError};
 use kovanica_state::{
@@ -19,17 +20,23 @@ use kovanica_state::{
 
 use crate::mempool::Mempool;
 
-/// The timestamp to stamp on a new block built on `parents`: one millisecond
-/// after the latest parent (genesis is at 0). This is a deterministic,
-/// strictly-monotone logical clock — no wall-clock dependency, so node
-/// behaviour stays reproducible — and it satisfies the difficulty layer's
-/// "not older than any parent" rule (see [`kovanica_dag::Dag::set_difficulty`]).
-fn next_timestamp(dag: &Dag, parents: &[BlockId]) -> u64 {
-    parents
-        .iter()
-        .filter_map(|p| dag.block(p).map(|b| b.timestamp_ms()))
-        .max()
-        .map_or(0, |latest| latest + 1)
+/// How far ahead of the local wall clock a received block's timestamp may sit
+/// before the node rejects it: two hours, in milliseconds. This is **node
+/// policy**, not pure-DAG consensus — it depends on the local clock, so it lives
+/// at the block-acceptance layer, not in [`kovanica_dag`]. (Bitcoin uses the
+/// same two-hour future-time bound.)
+const MAX_FUTURE_DRIFT_MS: u64 = 2 * 60 * 60 * 1000; // 2 hours
+
+/// The node's source of wall-clock time. Injectable so production timestamps and
+/// the future-time bound are deterministic in tests (and controllable in
+/// simulated environments) — see [`Node::set_now_ms`].
+#[derive(Default)]
+enum Clock {
+    /// Real UNIX wall-clock time.
+    #[default]
+    Wall,
+    /// A pinned time in milliseconds since the UNIX epoch.
+    Fixed(u64),
 }
 
 /// Why a node operation failed.
@@ -54,6 +61,14 @@ pub enum NodeError {
     Io(String),
     /// Decoding a snapshot failed.
     Snapshot(String),
+    /// A received block's timestamp is further ahead of the local wall clock than
+    /// [`MAX_FUTURE_DRIFT_MS`] allows (node policy, not pure-DAG consensus).
+    TimestampTooFarInFuture {
+        /// The block's timestamp, in milliseconds.
+        timestamp_ms: u64,
+        /// The local wall-clock time it was checked against, in milliseconds.
+        now_ms: u64,
+    },
 }
 
 impl core::fmt::Display for NodeError {
@@ -68,6 +83,10 @@ impl core::fmt::Display for NodeError {
             NodeError::Insert(e) => write!(f, "{e}"),
             NodeError::Io(e) => write!(f, "io error: {e}"),
             NodeError::Snapshot(e) => write!(f, "bad snapshot: {e}"),
+            NodeError::TimestampTooFarInFuture { timestamp_ms, now_ms } => write!(
+                f,
+                "block timestamp {timestamp_ms}ms is more than {MAX_FUTURE_DRIFT_MS}ms ahead of local time {now_ms}ms"
+            ),
         }
     }
 }
@@ -102,12 +121,49 @@ pub struct BlockRecord {
 pub struct Node {
     ledger: Option<Ledger>,
     mempool: Mempool,
+    clock: Clock,
 }
 
 impl Node {
     /// A fresh node with no ledger yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The node's current wall-clock time in milliseconds since the UNIX epoch.
+    /// With the default [`Clock::Wall`] this reads the system clock (returning 0
+    /// if it is somehow before the epoch — no panic); a pinned clock returns its
+    /// fixed value.
+    fn now_ms(&self) -> u64 {
+        match self.clock {
+            Clock::Wall => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
+            Clock::Fixed(n) => n,
+        }
+    }
+
+    /// Pin the node's clock to a fixed time (milliseconds since the UNIX epoch),
+    /// making both produced-block timestamps and the future-time bound
+    /// deterministic. Primarily for tests and controlled/simulated environments;
+    /// a real node runs on the default wall clock.
+    pub fn set_now_ms(&mut self, now_ms: u64) {
+        self.clock = Clock::Fixed(now_ms);
+    }
+
+    /// The timestamp to stamp on a new block built on `parents`: the node's
+    /// wall-clock now, clamped up to stay strictly after the latest parent
+    /// (genesis is at 0). The wall clock makes timestamps meaningful; the clamp
+    /// keeps them monotone even if the clock is behind or a parent is ahead, so
+    /// they still satisfy the difficulty layer's "not older than any parent" rule
+    /// (see [`kovanica_dag::Dag::set_difficulty`]).
+    fn next_timestamp(&self, dag: &Dag, parents: &[BlockId]) -> u64 {
+        let floor = parents
+            .iter()
+            .filter_map(|p| dag.block(p).map(|b| b.timestamp_ms()))
+            .max()
+            .map_or(0, |latest| latest + 1);
+        self.now_ms().max(floor)
     }
 
     /// Whether a genesis has been created.
@@ -215,10 +271,12 @@ impl Node {
     pub fn send(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<Sent, NodeError> {
         let tx = self.build_transfer(from_seed, amount, to_seed)?;
         let tx_id = tx.id();
+        // Compute parents / timestamp / work while holding the shared borrow (the
+        // wall-clock timestamp needs `&self`), before the `&mut` insert.
+        let parents = self.ledger()?.dag().tips();
+        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+        let work = self.ledger()?.dag().next_work_target(&parents).unwrap_or(1);
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
-        let parents = ledger.dag().tips();
-        let timestamp = next_timestamp(ledger.dag(), &parents);
-        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
         let block = ledger
             .insert(parents, work, timestamp, &[tx])
             .map_err(NodeError::Insert)?;
@@ -277,10 +335,19 @@ impl Node {
             return Ok(None);
         }
 
+        // Compute parents / timestamp / work under a shared borrow (the wall-clock
+        // timestamp needs `&self`) before taking the `&mut` insert.
+        let parents = self.ledger.as_ref().expect("checked above").dag().tips();
+        let timestamp =
+            self.next_timestamp(self.ledger.as_ref().expect("checked above").dag(), &parents);
+        let work = self
+            .ledger
+            .as_ref()
+            .expect("checked above")
+            .dag()
+            .next_work_target(&parents)
+            .unwrap_or(1);
         let ledger = self.ledger.as_mut().expect("checked above");
-        let parents = ledger.dag().tips();
-        let timestamp = next_timestamp(ledger.dag(), &parents);
-        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
         let block = ledger
             .insert(parents, work, timestamp, &selected)
             .map_err(NodeError::Insert)?;
@@ -322,6 +389,16 @@ impl Node {
     /// returns its id rather than an error. The block's parents must already be
     /// present (feed records in topological order).
     pub fn receive_block(&mut self, record: BlockRecord) -> Result<BlockId, NodeError> {
+        // Node policy (not pure-DAG consensus): reject a block dated too far ahead
+        // of our local wall clock. This depends on the local clock, so it cannot
+        // live in `kovanica_dag`; it is applied here, before the ledger insert.
+        let now_ms = self.now_ms();
+        if record.timestamp_ms > now_ms.saturating_add(MAX_FUTURE_DRIFT_MS) {
+            return Err(NodeError::TimestampTooFarInFuture {
+                timestamp_ms: record.timestamp_ms,
+                now_ms,
+            });
+        }
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         match ledger.insert(
             record.parents,
