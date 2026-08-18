@@ -8,9 +8,11 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > with ed25519 spend authorisation, per-block state, and snapshot persistence
 > (`crates/kovanica-state`); and a runnable node binary with a line RPC, a
 > mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
-> Still **TODO** (below): continuous p2p gossip with peer discovery, and
-> difficulty adjustment. Keep this file in sync with the code: update it in the
-> same change that adds or moves the structure it describes.
+> A difficulty-retargeting algorithm exists (`kovanica-dag::difficulty`). Still
+> **TODO** (below): continuous p2p gossip with peer discovery, and consensus
+> enforcement of difficulty (blocks carry no timestamp yet). Keep this file in
+> sync with the code: update it in the same change that adds or moves the
+> structure it describes.
 
 ---
 
@@ -66,6 +68,7 @@ crates/
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
       snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
+      difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm)
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
@@ -132,6 +135,11 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   DAG (via `Dag::preview`), so a block invalid in its own view is rejected at
   insert. Two *parallel* blocks that spend the same output are each valid in their
   own view and both admitted; their conflict resolves only in a merger's view.
+- **`work` is caller-set**; there is no proof-of-work and blocks carry no
+  timestamp. `difficulty::Retarget::next_work` is the retargeting *algorithm* (it
+  takes timestamped samples), but nothing enforces a block's work against the
+  target its past implies — consensus-enforced difficulty needs a `Block`
+  timestamp field (a breaking change to `Block`), tracked as a follow-up.
 
 ## 4. Build, test & run
 
@@ -215,4 +223,7 @@ is a library plus a binary (`serve`/`demo`).
       nodes converging on the same DAG (conflicts resolved identically).
 - [ ] Continuous p2p gossip: peer discovery, a relay loop, tx (not just block)
       dissemination; mempool eviction of permanently-invalid txs.
-- [ ] Difficulty adjustment for `work`.
+- [~] Difficulty adjustment for `work`: the retargeting algorithm
+      (`difficulty::Retarget::next_work`) is done and tested; consensus enforcement
+      (a `Block` timestamp field + validating work against the target the block's
+      past implies) is the follow-up.

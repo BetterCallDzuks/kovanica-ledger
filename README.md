@@ -20,6 +20,9 @@ protocol behind Kaspa).
   that identifies the well-connected cluster and bounds an attacker's influence.
 - **Linearization**: a deterministic total order over the whole DAG, plus the
   selected (heaviest) chain.
+- **Difficulty retargeting** (`difficulty::Retarget`): computes the `work` the
+  next block should target from the timestamps + work of recent blocks, holding a
+  steady block rate (the algorithm; consensus enforcement awaits block timestamps).
 
 `crates/kovanica-state` — the UTXO ledger:
 
