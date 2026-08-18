@@ -97,8 +97,8 @@ fn io(e: std::io::Error) -> NetError {
 }
 
 /// Wire encoding of block records: count, then per record — parents
-/// (count + 32-byte ids), work (u128), and the block payload (length-prefixed,
-/// the same encoding a block carries).
+/// (count + 32-byte ids), work (u128), timestamp (u64), and the block payload
+/// (length-prefixed, the same encoding a block carries).
 fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(records.len() as u64).to_le_bytes());
@@ -108,6 +108,7 @@ fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
             buf.extend_from_slice(parent.as_bytes());
         }
         buf.extend_from_slice(&record.work.to_le_bytes());
+        buf.extend_from_slice(&record.timestamp_ms.to_le_bytes());
         let payload = encode_block_payload(&record.txs);
         buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         buf.extend_from_slice(&payload);
@@ -117,7 +118,9 @@ fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
 
 fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
     let mut r = Cursor { buf: bytes, pos: 0 };
-    let count = r.read_count(48)?; // each record is at least 8 + 16 + 8 = 32 bytes
+    // Each record is at least 8 (parents len) + 16 (work) + 8 (timestamp) +
+    // 8 (payload len) = 40 bytes.
+    let count = r.read_count(40)?;
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let n_parents = r.read_count(32)?;
@@ -126,10 +129,16 @@ fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
             parents.push(BlockId::from_bytes(r.read_array::<32>()?));
         }
         let work = u128::from_le_bytes(r.read_array::<16>()?);
+        let timestamp_ms = u64::from_le_bytes(r.read_array::<8>()?);
         let payload_len = r.read_count(1)?;
         let payload = r.read_slice(payload_len)?;
         let txs = decode_block_payload(payload).map_err(|e| NetError::Decode(e.to_string()))?;
-        records.push(BlockRecord { parents, work, txs });
+        records.push(BlockRecord {
+            parents,
+            work,
+            timestamp_ms,
+            txs,
+        });
     }
     if r.pos != bytes.len() {
         return Err(NetError::Decode("trailing bytes".into()));

@@ -20,9 +20,12 @@ protocol behind Kaspa).
   that identifies the well-connected cluster and bounds an attacker's influence.
 - **Linearization**: a deterministic total order over the whole DAG, plus the
   selected (heaviest) chain.
-- **Difficulty retargeting** (`difficulty::Retarget`): computes the `work` the
-  next block should target from the timestamps + work of recent blocks, holding a
-  steady block rate (the algorithm; consensus enforcement awaits block timestamps).
+- **Difficulty** (`difficulty::Retarget` + `Dag::set_difficulty`): computes the
+  `work` the next block should target from the timestamps + work of recent blocks
+  to hold a steady block rate, and **enforces it in consensus** — with difficulty
+  enabled, `Dag::insert` requires each block's `work` to equal
+  `Dag::next_work_target` and its `timestamp` not to precede any parent's.
+  Enforcement is opt-in; blocks now carry a `timestamp`.
 - **Reachability oracle** (`reachability::Reachability`): an interval-tree +
   future-covering-set index for O(1) ancestor queries — now the DAG's backing for
   ancestor and mergeset computation, so the O(n²) per-block `past` sets are gone

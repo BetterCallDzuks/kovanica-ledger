@@ -9,11 +9,14 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > finality-depth pruning / re-orgs (`crates/kovanica-state`); and a runnable node
 > binary with a line RPC, a
 > mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
-> A difficulty-retargeting algorithm exists (`kovanica-dag::difficulty`). Still
-> **TODO** (below): continuous p2p gossip with peer discovery, and consensus
-> enforcement of difficulty (blocks carry no timestamp yet). Keep this file in
-> sync with the code: update it in the same change that adds or moves the
-> structure it describes.
+> Difficulty is both an algorithm (`kovanica-dag::difficulty`) and, now,
+> **consensus-enforced**: blocks carry a `timestamp`, and an opt-in policy
+> (`Dag::set_difficulty`) requires each block's `work` to equal the target its
+> past implies and its timestamp not to precede any parent's. Still **TODO**
+> (below): continuous p2p gossip with peer discovery, and a wall-clock
+> future-time bound on timestamps (node policy, not a pure function of the DAG).
+> Keep this file in sync with the code: update it in the same change that adds or
+> moves the structure it describes.
 
 ---
 
@@ -63,17 +66,18 @@ crates/
   kovanica-dag/                The DAG + GHOSTDAG consensus core (first slice)
     src/
       lib.rs                   Crate docs + re-exports + a doctest quick tour
-      block.rs                 Block (multi-parent vertex) and BlockId (BLAKE3 hash)
-      dag.rs                   Dag store: insert/validate, oracle-backed reachability + mergeset, past_size, tips, GhostdagData, preview(), chain_key
+      block.rs                 Block (multi-parent vertex, work + timestamp) and BlockId (BLAKE3 hash)
+      dag.rs                   Dag store: insert/validate, oracle-backed reachability + mergeset, past_size, tips, GhostdagData, preview(), chain_key, set_difficulty/next_work_target
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
       snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
-      difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm)
+      difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm); enforced via Dag::set_difficulty
       reachability.rs          Reachability oracle: interval-tree + future-covering sets (the Dag's backing for is_ancestor + mergeset)
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
       reachability.rs          Differential: Dag/oracle is_ancestor == naive parent-walk over random adversarial DAGs
+      difficulty.rs            Integration + adversarial: enforced work/timestamp (understate/overstate/backdate rejected, target deterministic)
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
     src/
       lib.rs                   Crate docs + re-exports + an end-to-end doctest
@@ -88,6 +92,7 @@ crates/
       perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
       persistence.rs           Integration: Ledger snapshot round-trip (state recomputed by replay)
       finality.rs              Integration: finality-depth pruning, deep-reorg rejection, implicit re-org
+      difficulty.rs            Integration: Ledger::set_difficulty enforces work/timestamp end-to-end
   kovanica-node/               Runnable node binary, mempool, and block gossip (third slice + multi-node)
     src/
       lib.rs                   Crate docs + re-exports + a doctest of the RPC
@@ -155,11 +160,20 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   DAG (via `Dag::preview`), so a block invalid in its own view is rejected at
   insert. Two *parallel* blocks that spend the same output are each valid in their
   own view and both admitted; their conflict resolves only in a merger's view.
-- **`work` is caller-set**; there is no proof-of-work and blocks carry no
-  timestamp. `difficulty::Retarget::next_work` is the retargeting *algorithm* (it
-  takes timestamped samples), but nothing enforces a block's work against the
-  target its past implies — consensus-enforced difficulty needs a `Block`
-  timestamp field (a breaking change to `Block`), tracked as a follow-up.
+- **Difficulty** now has both the algorithm and consensus enforcement. `Block`
+  carries a `timestamp_ms` (in the canonical id encoding); there is still no
+  proof-of-work, so `work` is caller-set *unless* difficulty is enabled.
+  `difficulty::Retarget::next_work` is the retargeting *algorithm*;
+  `Dag::set_difficulty(retarget)` opts a DAG into **enforcement**, after which
+  `Dag::insert` requires every non-genesis block's `work` to equal
+  `Dag::next_work_target(parents)` (the retarget over the last `window + 1` blocks
+  of the selected-parent chain — a pure function of the DAG) and its timestamp not
+  to precede any parent's. Genesis is exempt. `Ledger::set_difficulty` threads the
+  same switch through the state layer, and the node mines produced blocks to
+  `next_work_target` when it is set. Enforcement is **opt-in**, so a DAG built
+  without it accepts any `work`, exactly as before. Not enforced: a wall-clock
+  "not too far in the future" bound on timestamps — that is node policy, not a
+  pure function of the DAG, and remains a follow-up.
 
 ## 4. Build, test & run
 
@@ -249,7 +263,11 @@ is a library plus a binary (`serve`/`demo`).
       nodes converging on the same DAG (conflicts resolved identically).
 - [ ] Continuous p2p gossip: peer discovery, a relay loop, tx (not just block)
       dissemination; mempool eviction of permanently-invalid txs.
-- [~] Difficulty adjustment for `work`: the retargeting algorithm
-      (`difficulty::Retarget::next_work`) is done and tested; consensus enforcement
-      (a `Block` timestamp field + validating work against the target the block's
-      past implies) is the follow-up.
+- [x] Difficulty adjustment for `work`: the retargeting algorithm
+      (`difficulty::Retarget::next_work`) plus **consensus enforcement**. `Block`
+      now carries a `timestamp_ms`; `Dag::set_difficulty` opts a DAG into
+      validating each block's `work` against `Dag::next_work_target` (the retarget
+      over the selected-parent chain — a pure function of the DAG) and its
+      timestamp against its parents'. Threaded through `Ledger::set_difficulty` and
+      the node's miner. A wall-clock future-time bound on timestamps (node policy,
+      not pure-DAG) remains a follow-up.

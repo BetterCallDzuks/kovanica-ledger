@@ -18,6 +18,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::block::{Block, BlockId};
+use crate::difficulty::{Retarget, TimedWork};
 use crate::reachability::Reachability;
 use crate::validation::BlockValidator;
 
@@ -34,6 +35,20 @@ pub enum DagError {
     GenesisAlreadySet,
     /// The installed [`BlockValidator`] rejected the block, with its reason.
     InvalidBlock { id: BlockId, reason: String },
+    /// Difficulty is enforced and the block's `work` does not equal the target
+    /// its past implies (see [`Dag::set_difficulty`] and [`crate::difficulty`]).
+    DifficultyMismatch {
+        id: BlockId,
+        expected: u128,
+        actual: u128,
+    },
+    /// Difficulty is enforced and the block's timestamp precedes a parent's —
+    /// a block may not be older than a block it builds on.
+    NonMonotonicTimestamp {
+        id: BlockId,
+        timestamp_ms: u64,
+        parent_timestamp_ms: u64,
+    },
 }
 
 impl core::fmt::Display for DagError {
@@ -46,6 +61,22 @@ impl core::fmt::Display for DagError {
             DagError::InvalidBlock { id, reason } => {
                 write!(f, "block {id} rejected by validator: {reason}")
             }
+            DagError::DifficultyMismatch {
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "block {id} has work {actual}, but difficulty requires {expected}"
+            ),
+            DagError::NonMonotonicTimestamp {
+                id,
+                timestamp_ms,
+                parent_timestamp_ms,
+            } => write!(
+                f,
+                "block {id} timestamp {timestamp_ms}ms precedes parent timestamp {parent_timestamp_ms}ms"
+            ),
         }
     }
 }
@@ -118,6 +149,11 @@ pub struct Dag {
     /// Optional payload-aware validator run on each [`Dag::insert`]. See
     /// [`crate::validation`].
     validator: Option<Box<dyn BlockValidator>>,
+    /// Optional consensus-enforced difficulty policy. When set, each
+    /// [`Dag::insert`] requires the block's `work` to equal the target its past
+    /// implies and its timestamp not to precede any parent's. See
+    /// [`Dag::set_difficulty`] and [`crate::difficulty`].
+    difficulty: Option<Retarget>,
 }
 
 impl Dag {
@@ -150,6 +186,7 @@ impl Dag {
             tips,
             reach: Reachability::empty(),
             validator: None,
+            difficulty: None,
         };
         dag.reach = Reachability::build(&dag);
         dag
@@ -167,6 +204,50 @@ impl Dag {
     /// Install (or replace) the block validator run on every [`Dag::insert`].
     pub fn set_validator(&mut self, validator: Box<dyn BlockValidator>) {
         self.validator = Some(validator);
+    }
+
+    /// Enable consensus-enforced difficulty with retargeting policy `retarget`.
+    ///
+    /// Once enabled, every subsequent [`Dag::insert`] of a non-genesis block
+    /// must satisfy both rules (see [`crate::difficulty`]):
+    ///
+    /// * **Enforced work.** The block's `work` must equal
+    ///   `retarget.next_work(samples)`, where `samples` are the last
+    ///   `window + 1` blocks of the selected-parent chain ending at the block's
+    ///   selected parent (oldest first). Because the samples and the selected
+    ///   chain are a pure function of the DAG, every node computes the same
+    ///   target, so this is a deterministic consensus rule. Blocks with too
+    ///   little history are required to carry [`Retarget::min_work`].
+    /// * **Monotone timestamp.** The block's timestamp must not be earlier than
+    ///   any parent's, so timestamps along every path are non-decreasing and the
+    ///   retarget's timespans are well defined.
+    ///
+    /// Genesis is exempt (it has no past). Difficulty is off by default, so a
+    /// DAG built without this call accepts any `work`, exactly as before.
+    ///
+    /// Note: this enforces work against the target the DAG implies; it does
+    /// **not** bound a timestamp against wall-clock time (a "not too far in the
+    /// future" rule is node policy, not a pure function of the DAG, and remains a
+    /// follow-up).
+    pub fn set_difficulty(&mut self, retarget: Retarget) {
+        self.difficulty = Some(retarget);
+    }
+
+    /// The enforced difficulty policy, if any (see [`Dag::set_difficulty`]).
+    pub fn difficulty(&self) -> Option<Retarget> {
+        self.difficulty
+    }
+
+    /// The `work` a new block built on `parents` must carry to satisfy the
+    /// enforced difficulty policy, or `None` when difficulty is disabled.
+    ///
+    /// This is the miner's counterpart to insert-time enforcement: mine a block
+    /// with this work (and a timestamp not preceding any parent's) and it passes
+    /// [`Dag::insert`]'s difficulty check. `parents` must be present in the DAG.
+    pub fn next_work_target(&self, parents: &[BlockId]) -> Option<u128> {
+        let retarget = self.difficulty?;
+        let sp = parents.iter().copied().max_by_key(|p| self.chain_key(p))?;
+        Some(retarget.next_work(&self.chain_samples(sp, retarget.window)))
     }
 
     /// The GHOSTDAG `k` parameter.
@@ -263,6 +344,57 @@ impl Dag {
         mergeset
     }
 
+    /// Enforce the difficulty rules on a prospective `block` (id `id`) with
+    /// selected parent `sp`, under policy `retarget`. See [`Dag::set_difficulty`].
+    fn check_difficulty(
+        &self,
+        block: &Block,
+        id: BlockId,
+        sp: BlockId,
+        retarget: &Retarget,
+    ) -> Result<(), DagError> {
+        // Timestamp must not precede any parent's (monotone along every path).
+        for parent in block.parents() {
+            let parent_ts = self.nodes[parent].block.timestamp_ms();
+            if block.timestamp_ms() < parent_ts {
+                return Err(DagError::NonMonotonicTimestamp {
+                    id,
+                    timestamp_ms: block.timestamp_ms(),
+                    parent_timestamp_ms: parent_ts,
+                });
+            }
+        }
+
+        // Work must equal the target the selected chain ending at `sp` implies.
+        let expected = retarget.next_work(&self.chain_samples(sp, retarget.window));
+        if block.work() != expected {
+            return Err(DagError::DifficultyMismatch {
+                id,
+                expected,
+                actual: block.work(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The last `window + 1` blocks of the selected-parent chain ending at `tip`
+    /// (inclusive), oldest first, as difficulty-retarget samples. This is the
+    /// window [`Retarget::next_work`] scores to set the *next* block's work.
+    fn chain_samples(&self, tip: BlockId, window: usize) -> Vec<TimedWork> {
+        let mut samples = Vec::new();
+        let mut cur = Some(tip);
+        while let Some(id) = cur {
+            let node = &self.nodes[&id];
+            samples.push(TimedWork::new(node.block.timestamp_ms(), node.block.work()));
+            if samples.len() == window + 1 {
+                break;
+            }
+            cur = node.ghostdag.selected_parent;
+        }
+        samples.reverse(); // collected newest-first; retarget wants oldest-first
+        samples
+    }
+
     /// Preview the GHOSTDAG selected parent and mergeset a block would get if it
     /// were inserted with `block`'s parents — **without** inserting it.
     ///
@@ -299,9 +431,11 @@ impl Dag {
     /// Insert `block`, validating and colouring it. Returns its id.
     ///
     /// Fails if the block is a duplicate, references a missing parent, (for a
-    /// non-genesis block) references no parents, or is rejected by the installed
-    /// [`BlockValidator`] (if any). The structural DAG checks run first, so a
-    /// validator only ever sees a block whose parents are present.
+    /// non-genesis block) references no parents, is rejected by the installed
+    /// [`BlockValidator`] (if any), or — when difficulty is enforced (see
+    /// [`Dag::set_difficulty`]) — carries the wrong `work` or a timestamp that
+    /// precedes a parent's. The structural DAG checks run first, so a validator
+    /// only ever sees a block whose parents are present.
     pub fn insert(&mut self, block: Block) -> Result<BlockId, DagError> {
         let id = block.id();
         if self.nodes.contains_key(&id) {
@@ -332,6 +466,14 @@ impl Dag {
         let sp = ghostdag
             .selected_parent
             .expect("non-genesis has a selected parent");
+
+        // Consensus-enforced difficulty, if enabled: the block's timestamp must
+        // not precede a parent's, and its work must equal the target its past
+        // (the selected chain ending at `sp`) implies. Checked before the block
+        // is wired in, so a rejected block leaves the DAG unchanged.
+        if let Some(retarget) = self.difficulty {
+            self.check_difficulty(&block, id, sp, &retarget)?;
+        }
         let past_size = self.nodes[&sp].past_size
             + 1
             + (ghostdag.mergeset_blues.len() + ghostdag.mergeset_reds.len()) as u64;

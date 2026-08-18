@@ -29,7 +29,7 @@ impl Rng {
 /// references 1–3 distinct existing blocks and has a small random work, producing
 /// varied shapes (chains, wide forks, deep merges).
 fn random_dag(seed: u64, n: usize, k: u16) -> (Dag, Vec<BlockId>) {
-    let genesis = Block::genesis(1, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
     let genesis_id = genesis.id();
     let mut dag = Dag::new(k, genesis);
     let mut ids = vec![genesis_id];
@@ -49,7 +49,7 @@ fn random_dag(seed: u64, n: usize, k: u16) -> (Dag, Vec<BlockId>) {
         }
         let work = 1 + rng.below(4) as u128;
         let id = dag
-            .insert(Block::new(parents, work, format!("b{i}").into_bytes()))
+            .insert(Block::new(parents, work, 0, format!("b{i}").into_bytes()))
             .expect("random block is valid");
         ids.push(id);
     }
@@ -128,13 +128,13 @@ fn matches_past_sets_on_random_dags() {
 
 #[test]
 fn matches_on_a_linear_chain() {
-    let genesis = Block::genesis(1, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
     let mut dag = Dag::new(3, genesis);
     let mut ids = vec![dag.genesis()];
     for i in 0..20 {
         let parent = *ids.last().unwrap();
         ids.push(
-            dag.insert(Block::new(vec![parent], 1, format!("c{i}").into_bytes()))
+            dag.insert(Block::new(vec![parent], 1, 0, format!("c{i}").into_bytes()))
                 .unwrap(),
         );
     }
@@ -143,17 +143,17 @@ fn matches_on_a_linear_chain() {
 
 #[test]
 fn matches_on_a_wide_fork_and_merge() {
-    let genesis = Block::genesis(1, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
     let mut dag = Dag::new(2, genesis);
     let g = dag.genesis();
     let parallel: Vec<BlockId> = (0..8)
         .map(|i| {
-            dag.insert(Block::new(vec![g], 1, format!("w{i}").into_bytes()))
+            dag.insert(Block::new(vec![g], 1, 0, format!("w{i}").into_bytes()))
                 .unwrap()
         })
         .collect();
     let merge = dag
-        .insert(Block::new(parallel.clone(), 1, b"m".to_vec()))
+        .insert(Block::new(parallel.clone(), 1, 0, b"m".to_vec()))
         .unwrap();
 
     let mut ids = vec![g];
@@ -164,15 +164,21 @@ fn matches_on_a_wide_fork_and_merge() {
 
 #[test]
 fn matches_on_a_diamond() {
-    let genesis = Block::genesis(1, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
     let mut dag = Dag::new(3, genesis);
     let g = dag.genesis();
-    let a = dag.insert(Block::new(vec![g], 1, b"a".to_vec())).unwrap();
-    let b = dag.insert(Block::new(vec![g], 1, b"b".to_vec())).unwrap();
+    let a = dag
+        .insert(Block::new(vec![g], 1, 0, b"a".to_vec()))
+        .unwrap();
+    let b = dag
+        .insert(Block::new(vec![g], 1, 0, b"b".to_vec()))
+        .unwrap();
     let m = dag
-        .insert(Block::new(vec![a, b], 1, b"m".to_vec()))
+        .insert(Block::new(vec![a, b], 1, 0, b"m".to_vec()))
         .unwrap();
     // A tail block off only one side, to exercise a non-tree covering path.
-    let c = dag.insert(Block::new(vec![a], 1, b"c".to_vec())).unwrap();
+    let c = dag
+        .insert(Block::new(vec![a], 1, 0, b"c".to_vec()))
+        .unwrap();
     assert_oracle_matches(&dag, &[g, a, b, m, c]);
 }
