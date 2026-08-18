@@ -48,8 +48,10 @@ pub mod block;
 pub mod dag;
 pub mod ghostdag;
 pub mod ordering;
+pub mod snapshot;
 pub mod validation;
 
 pub use block::{Block, BlockId};
 pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam};
+pub use snapshot::{decode_snapshot, DagSnapshot, SnapshotError};
 pub use validation::BlockValidator;

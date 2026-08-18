@@ -34,6 +34,9 @@ protocol behind Kaspa).
   incrementally from its selected parent, so a block invalid in its own view
   (double-spending an ancestor, a bad signature) is rejected *at insert* and never
   enters the DAG. The full state matches the batch `apply_dag`.
+- **Persistence**: `write_snapshot`/`read_snapshot` on both the `Dag` and the
+  `Ledger` serialise a compact replay log (blocks in topological order); loading
+  recomputes all consensus and UTXO state, so nothing derived is trusted from disk.
 
 ## Build & test
 

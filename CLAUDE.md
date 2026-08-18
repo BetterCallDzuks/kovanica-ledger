@@ -63,6 +63,7 @@ crates/
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
+      snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
@@ -71,12 +72,13 @@ crates/
       keys.rs                  Address, KeyPair, verify() — ed25519 spend authorisation
       tx.rs                    Transaction/TxId/OutPoint/TxInput/TxOutput; canonical encoding; sighash
       utxo.rs                  UtxoSet: the unspent-output state, with balance/total_value
-      ledger.rs                apply_block()/apply_dag() (batch) + Ledger (per-block UTXO state, stateful insert)
+      ledger.rs                apply_block()/apply_dag() (batch) + Ledger (per-block UTXO state, stateful insert, snapshot)
       validation.rs            TxStructureValidator: context-free structural checks (a BlockValidator)
     tests/
       ledger.rs                Integration + adversarial (double-spend across parallel blocks, order-independence)
       validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
       perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
+      persistence.rs           Integration: Ledger snapshot round-trip (state recomputed by replay)
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): `network` (p2p
@@ -89,7 +91,11 @@ Update this tree when you add them.
 - **Reachability** is answered from a per-block `past` set stored in full: O(1)
   queries but O(n²) memory. Production replaces this with a reachability oracle
   (interval labels). See `dag.rs` module docs.
-- **In-memory only** — no persistence layer yet.
+- **In-memory working state**, with **replay-log persistence**: `Dag`/`Ledger`
+  `write_snapshot`/`read_snapshot` serialise only `k`, the subsidy, and the blocks
+  in topological order; loading replays inserts so all derived state (past sets,
+  colouring, per-block UTXO state) is recomputed, never trusted from disk. There
+  is no incremental on-disk store or mmap yet — a snapshot is written/read whole.
 - **Linearization** is the recursive GHOSTDAG order:
   `order(B) = order(selected_parent(B)) ++ mergeset_order(B) ++ [B]`, unrolled over
   the selected chain and closed with the selected tip's anticone (the virtual
@@ -178,7 +184,10 @@ Rust workspace (edition 2021, `rust-version` 1.75). From the repo root:
       (`Ledger`), matching `apply_dag`; enables stateful validation at insert.
 - [ ] Incremental re-orgs / state revert + pruning (finality depth); `Ledger` is
       append-only today and stores each block's state in full.
-- [ ] Reachability oracle to replace full per-block `past` sets.
-- [ ] Persistence (an on-disk store) for the DAG and consensus data.
+- [x] Persistence: replay-log snapshots of the DAG and ledger
+      (`Dag`/`Ledger` `write_snapshot`/`read_snapshot`) — state recomputed on load.
+- [ ] Reachability oracle to replace full per-block `past` sets (interval labels +
+      future-covering sets); also rewires mergeset computation and the ordering key.
+- [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
 - [ ] p2p networking / gossip and a runnable node binary with RPC.
 - [ ] Difficulty adjustment for `work`.
