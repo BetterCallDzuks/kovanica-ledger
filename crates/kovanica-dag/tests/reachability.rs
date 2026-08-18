@@ -126,6 +126,173 @@ fn matches_past_sets_on_random_dags() {
     }
 }
 
+/// The core behaviour-preservation guard for the *incremental* oracle: the
+/// answers `Dag::is_ancestor`/`is_chain_ancestor` give (maintained incrementally
+/// by `Reachability::add_block` on each insert) must equal, for **every** ordered
+/// pair, the answers a from-scratch `Reachability::build` of the same DAG gives —
+/// checked after *each* insert, not only at the end. This pins the incremental
+/// path to the from-scratch construction directly, independently of the naive
+/// ground truth.
+fn assert_incremental_equals_fresh(dag: &Dag, ids: &[BlockId]) {
+    let fresh = Reachability::build(dag);
+    for a in ids {
+        for b in ids {
+            // `Dag::is_ancestor` reads the incrementally-maintained oracle; `fresh`
+            // is the from-scratch construction. The two must agree on every ordered
+            // pair. `is_ancestor` exercises both the tree-interval query and the
+            // future-covering-set query, and `is_chain_ancestor` shares the same
+            // `tree_reaches` path, so this O(1)-per-pair check covers the whole
+            // query surface — cheap enough to run after every single insert. Full
+            // `is_chain_ancestor`-vs-walk coverage is done once via
+            // `assert_oracle_matches` at the end of each scenario.
+            assert_eq!(
+                dag.is_ancestor(a, b),
+                fresh.is_ancestor(a, b),
+                "incremental vs fresh is_ancestor ({a}, {b})"
+            );
+        }
+    }
+}
+
+/// Build random adversarial DAGs and, after *every* insert, assert the
+/// incrementally-maintained oracle answers identically to a freshly-built one on
+/// all ordered pairs. Larger `n` than the differential test, so more of the
+/// interval space (and reindexing) is exercised.
+#[test]
+fn incremental_matches_fresh_after_every_insert() {
+    for seed in 0..24u64 {
+        let k = (seed % 5) as u16;
+        let n = 40 + (seed as usize % 40);
+
+        let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+        let genesis_id = genesis.id();
+        let mut dag = Dag::new(k, genesis);
+        let mut ids = vec![genesis_id];
+        let mut rng = Rng(seed.wrapping_add(0xD1B54A32D192ED03));
+
+        for i in 0..n {
+            let want = 1 + rng.below(3);
+            let mut parents: Vec<BlockId> = Vec::new();
+            for _ in 0..(want * 4) {
+                if parents.len() == want {
+                    break;
+                }
+                let cand = ids[rng.below(ids.len())];
+                if !parents.contains(&cand) {
+                    parents.push(cand);
+                }
+            }
+            let work = 1 + rng.below(4) as u128;
+            let id = dag
+                .insert(Block::new(parents, work, 0, format!("b{i}").into_bytes()))
+                .expect("random block is valid");
+            ids.push(id);
+            // Behaviour preservation must hold at every step, not just the end.
+            assert_incremental_equals_fresh(&dag, &ids);
+        }
+        // End-to-end: also pin the final DAG to the naive ground truth and the
+        // selected-parent-walk chain-ancestor reference.
+        assert_oracle_matches(&dag, &ids);
+    }
+}
+
+/// A long linear chain forces the tree interval capacity to shrink (each child
+/// takes half the parent's remaining span) until it is exhausted and a reindex
+/// reallocates the branch. Hundreds of blocks deep guarantees many reindexes.
+#[test]
+fn incremental_survives_a_long_chain_with_reindexing() {
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let mut dag = Dag::new(3, genesis);
+    let mut ids = vec![dag.genesis()];
+    for i in 0..600 {
+        let parent = *ids.last().unwrap();
+        ids.push(
+            dag.insert(Block::new(vec![parent], 1, 0, format!("c{i}").into_bytes()))
+                .unwrap(),
+        );
+    }
+    // Only the O(n^2) incremental-vs-fresh check here (naive ground truth, an
+    // extra O(n) per pair, is established at moderate n by the random tests).
+    assert_incremental_equals_fresh(&dag, &ids);
+}
+
+/// A very wide fan: one parent with hundreds of direct tree children. Each child
+/// consumes a halving of the parent's remaining capacity, so the parent's
+/// interval is exhausted repeatedly and reindexing must grow it. Then a single
+/// block merges every child, exercising a large mergeset / future-covering set.
+#[test]
+fn incremental_survives_a_wide_fan_with_reindexing() {
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let mut dag = Dag::new(400, genesis); // k large so the fan stays all-blue
+    let g = dag.genesis();
+    let mut ids = vec![g];
+    let mut children: Vec<BlockId> = Vec::new();
+    for i in 0..400 {
+        let id = dag
+            .insert(Block::new(vec![g], 1, 0, format!("w{i}").into_bytes()))
+            .unwrap();
+        children.push(id);
+        ids.push(id);
+    }
+    let merge = dag
+        .insert(Block::new(children, 1, 0, b"merge".to_vec()))
+        .unwrap();
+    ids.push(merge);
+    assert_incremental_equals_fresh(&dag, &ids);
+}
+
+/// A deep-and-wide mix: a spine of blocks, each fanning out a handful of side
+/// children that later merge back. Combines chain-depth reindexing with
+/// non-trivial future-covering sets.
+#[test]
+fn incremental_survives_deep_and_wide_mix() {
+    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let mut dag = Dag::new(8, genesis);
+    let mut ids = vec![dag.genesis()];
+    let mut spine = dag.genesis();
+    for level in 0..120 {
+        // Fan out several side blocks off the current spine tip …
+        let mut side: Vec<BlockId> = Vec::new();
+        for s in 0..4 {
+            let id = dag
+                .insert(Block::new(
+                    vec![spine],
+                    1,
+                    0,
+                    format!("l{level}s{s}").into_bytes(),
+                ))
+                .unwrap();
+            side.push(id);
+            ids.push(id);
+        }
+        // … then merge them all into the next spine block.
+        spine = dag
+            .insert(Block::new(
+                side,
+                1,
+                0,
+                format!("l{level}spine").into_bytes(),
+            ))
+            .unwrap();
+        ids.push(spine);
+    }
+    assert_incremental_equals_fresh(&dag, &ids);
+}
+
+/// Larger random adversarial DAGs (bigger `n` than the differential test), each
+/// validated end-to-end against both the naive ground truth (via
+/// `assert_oracle_matches`) and a fresh oracle (via `assert_incremental_equals_fresh`).
+#[test]
+fn incremental_matches_on_larger_random_dags() {
+    for seed in 0..12u64 {
+        let k = (seed % 4) as u16;
+        let n = 90 + (seed as usize % 40);
+        let (dag, ids) = random_dag(seed.wrapping_mul(2654435761), n, k);
+        assert_oracle_matches(&dag, &ids);
+        assert_incremental_equals_fresh(&dag, &ids);
+    }
+}
+
 #[test]
 fn matches_on_a_linear_chain() {
     let genesis = Block::genesis(1, 0, b"genesis".to_vec());
