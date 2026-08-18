@@ -41,6 +41,11 @@ protocol behind Kaspa).
 - **Persistence**: `write_snapshot`/`read_snapshot` on both the `Dag` and the
   `Ledger` serialise a compact replay log (blocks in topological order); loading
   recomputes all consensus and UTXO state, so nothing derived is trusted from disk.
+- **Finality & re-orgs** (`Ledger::with_finality`): blocks more than a finality
+  depth below the selected tip are final — their per-block state is pruned and
+  they can't be built on (a deep re-org is rejected). Above the finality point the
+  current state simply follows the selected tip, so a heavier branch takes over
+  with no explicit revert.
 
 `crates/kovanica-node` — a runnable node tying the stack together behind a small
 line RPC (`serve` reads commands from stdin; `demo` replays a scripted scenario).

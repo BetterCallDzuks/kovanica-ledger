@@ -35,9 +35,12 @@
 //!
 //! * `subsidy` is a single per-block constant passed in, not a halving schedule.
 //! * No coinbase maturity beyond "not in the same block"; no fee floor; no tx
-//!   size/weight limits. These belong with the pruning/finality slice.
-//! * [`apply_dag`] applies against a fresh state each call — there is no
-//!   incremental re-org handling yet (the GHOSTDAG order is taken as a snapshot).
+//!   size/weight limits.
+//! * [`apply_dag`] applies against a fresh state each call (the batch view). The
+//!   incremental [`Ledger`] follows the selected tip, so re-orgs above the
+//!   finality point are implicit (no revert), and [`Ledger::with_finality`] prunes
+//!   the stored state of final blocks and rejects blocks built on final history.
+//!   Pruning is of the per-block *state* only; the DAG itself is still append-only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -310,6 +313,12 @@ pub enum LedgerInsertError {
     /// (a stateful rule: a missing/already-spent input, a bad signature, value
     /// not conserved, or coinbase overspend).
     State(LedgerError),
+    /// The block builds on final history — its selected parent's blue score is
+    /// below the finality point, so it is rejected (a deep re-org).
+    Finality {
+        parent_score: u64,
+        finality_score: u64,
+    },
 }
 
 impl From<DagError> for LedgerInsertError {
@@ -329,6 +338,13 @@ impl core::fmt::Display for LedgerInsertError {
         match self {
             LedgerInsertError::Dag(e) => write!(f, "dag rejected block: {e}"),
             LedgerInsertError::State(e) => write!(f, "invalid block state: {e}"),
+            LedgerInsertError::Finality {
+                parent_score,
+                finality_score,
+            } => write!(
+                f,
+                "finality violation: selected parent blue score {parent_score} < finality {finality_score}"
+            ),
         }
     }
 }
@@ -362,11 +378,28 @@ impl std::error::Error for LedgerInsertError {}
 ///
 /// State is kept per block in full (mirroring the crate's other O(n²) first-slice
 /// simplifications); storing compact per-block diffs is a later optimisation.
+///
+/// ## Finality and pruning
+///
+/// A `Ledger` built with [`Ledger::with_finality`] treats blocks more than
+/// `finality_depth` blue score below the selected tip as **final**: no new block
+/// may build on them (their selected parent being final is a
+/// [`LedgerInsertError::Finality`]), so their stored per-block state is no longer
+/// needed and is **pruned**, bounding memory. This also makes the selected chain
+/// stable below the finality point — a deep re-org is rejected rather than
+/// applied. Above the finality point, re-orgs are implicit: [`Ledger::ledger_state`]
+/// always follows the current selected tip, so a heavier branch takes over with no
+/// explicit revert. [`Ledger::new`] uses an unbounded depth — it never prunes and
+/// never rejects on finality.
 pub struct Ledger {
     dag: Dag,
     subsidy: u64,
     genesis: BlockId,
+    /// Blocks this far in blue score below the selected tip are final; their
+    /// state is pruned and they cannot be built on. `u64::MAX` = never.
+    finality_depth: u64,
     /// Per-block view UTXO state: `states[&b]` is the ledger state in `b`'s view.
+    /// Final blocks (below the finality point) are pruned from this map.
     states: HashMap<BlockId, UtxoSet>,
 }
 
@@ -390,14 +423,47 @@ impl Ledger {
             dag,
             subsidy,
             genesis: genesis_id,
+            finality_depth: u64::MAX,
             states,
         })
+    }
+
+    /// Like [`Ledger::new`], but with a finite finality depth: blocks more than
+    /// `finality_depth` blue score below the selected tip become final — they may
+    /// not be built on, and their per-block state is pruned. See the type docs.
+    pub fn with_finality(
+        k: KParam,
+        subsidy: u64,
+        genesis_txs: &[Transaction],
+        finality_depth: u64,
+    ) -> Result<Self, LedgerError> {
+        let mut ledger = Self::new(k, subsidy, genesis_txs)?;
+        ledger.finality_depth = finality_depth;
+        Ok(ledger)
     }
 
     /// Borrow the underlying DAG (for consensus queries: tips, ghostdag,
     /// `linearize`, `selected_chain`, …).
     pub fn dag(&self) -> &Dag {
         &self.dag
+    }
+
+    /// The finality depth (blue score below the selected tip). `u64::MAX` means
+    /// finality/pruning is disabled.
+    pub fn finality_depth(&self) -> u64 {
+        self.finality_depth
+    }
+
+    /// The blue-score threshold below which blocks are final: blocks with a blue
+    /// score `< finality_score()` are pruned and may not be built on. `0` when
+    /// finality is disabled or the DAG is not yet `finality_depth` deep.
+    pub fn finality_score(&self) -> u64 {
+        if self.finality_depth == u64::MAX {
+            return 0;
+        }
+        let tip = self.dag.selected_tip();
+        let max = self.dag.ghostdag(&tip).map_or(0, |g| g.blue_score);
+        max.saturating_sub(self.finality_depth)
     }
 
     /// The genesis block id.
@@ -432,10 +498,26 @@ impl Ledger {
         // mergeset blocks' transactions applied in order. Previewing gets the
         // selected parent and mergeset without mutating the DAG.
         let preview = self.dag.preview(&block)?;
+
+        // Finality: a block may not build on final history. Its selected parent
+        // being final means its state has been pruned, so this check also
+        // guarantees the state lookup below succeeds.
+        let parent_score = self
+            .dag
+            .ghostdag(&preview.selected_parent)
+            .map_or(0, |g| g.blue_score);
+        let finality_score = self.finality_score();
+        if parent_score < finality_score {
+            return Err(LedgerInsertError::Finality {
+                parent_score,
+                finality_score,
+            });
+        }
+
         let mut state = self
             .states
             .get(&preview.selected_parent)
-            .expect("selected parent always has a stored state")
+            .expect("non-final selected parent always has a stored state")
             .clone();
         for merged in &preview.mergeset {
             let payload = self
@@ -458,7 +540,33 @@ impl Ledger {
         // Commit: add to the DAG (structural checks run here) and store the state.
         let id = self.dag.insert(block)?;
         self.states.insert(id, state);
+        self.prune();
         Ok(id)
+    }
+
+    /// Drop the stored state of every block that is now final (below
+    /// [`Ledger::finality_score`]). Finality only rises, so a pruned block stays
+    /// prunable; and only final blocks are dropped, which are never a future
+    /// block's selected parent (that is a finality violation) nor needed by
+    /// [`Ledger::ledger_state`] (which starts from the selected tip).
+    fn prune(&mut self) {
+        let threshold = self.finality_score();
+        if threshold == 0 {
+            return;
+        }
+        let stale: Vec<BlockId> = self
+            .states
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.dag
+                    .ghostdag(id)
+                    .is_some_and(|g| g.blue_score < threshold)
+            })
+            .collect();
+        for id in stale {
+            self.states.remove(&id);
+        }
     }
 
     /// The full current ledger state: every block applied in linearized order.
@@ -507,7 +615,9 @@ impl Ledger {
 
     /// Rebuild a ledger from a snapshot by replaying its blocks. The full state
     /// (and each block's view state) is recomputed, so the restored ledger is
-    /// identical to the original.
+    /// identical to the original — except that it restores at **unbounded
+    /// finality** (the snapshot stores blocks, not the runtime finality policy);
+    /// re-apply [`Ledger::with_finality`]'s depth after loading if wanted.
     pub fn read_snapshot(bytes: &[u8]) -> Result<Ledger, LedgerSnapshotError> {
         if bytes.len() < 4 || bytes[..4] != LEDGER_MAGIC {
             return Err(LedgerSnapshotError::BadMagic);

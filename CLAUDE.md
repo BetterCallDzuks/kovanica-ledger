@@ -5,8 +5,9 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > **Status: early implementation.** Three vertical slices exist, build, and are
 > tested: the block DAG and GHOSTDAG consensus core (`crates/kovanica-dag`); the
 > UTXO ledger/state layer that applies transactions in GHOSTDAG-linearized order
-> with ed25519 spend authorisation, per-block state, and snapshot persistence
-> (`crates/kovanica-state`); and a runnable node binary with a line RPC, a
+> with ed25519 spend authorisation, per-block state, snapshot persistence, and
+> finality-depth pruning / re-orgs (`crates/kovanica-state`); and a runnable node
+> binary with a line RPC, a
 > mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
 > A difficulty-retargeting algorithm exists (`kovanica-dag::difficulty`). Still
 > **TODO** (below): continuous p2p gossip with peer discovery, and consensus
@@ -77,13 +78,14 @@ crates/
       keys.rs                  Address, KeyPair, verify() — ed25519 spend authorisation
       tx.rs                    Transaction/TxId/OutPoint/TxInput/TxOutput; canonical encoding; sighash
       utxo.rs                  UtxoSet: the unspent-output state, with balance/total_value
-      ledger.rs                apply_block()/apply_dag() (batch) + Ledger (per-block UTXO state, stateful insert, snapshot)
+      ledger.rs                apply_block()/apply_dag() (batch) + Ledger (per-block state, stateful insert, snapshot, finality/pruning)
       validation.rs            TxStructureValidator: context-free structural checks (a BlockValidator)
     tests/
       ledger.rs                Integration + adversarial (double-spend across parallel blocks, order-independence)
       validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
       perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
       persistence.rs           Integration: Ledger snapshot round-trip (state recomputed by replay)
+      finality.rs              Integration: finality-depth pruning, deep-reorg rejection, implicit re-org
   kovanica-node/               Runnable node binary, mempool, and block gossip (third slice + multi-node)
     src/
       lib.rs                   Crate docs + re-exports + a doctest of the RPC
@@ -126,8 +128,12 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   view state incrementally from its selected parent (per-block state stored in
   full — the same O(n²) trade-off as `past` sets). A subsidy is a single per-block
   constant (no halving schedule); coinbase maturity is only "not spendable in the
-  same block"; there are no tx size/weight limits. `Ledger` is append-only — no
-  pruning or re-org/revert of stored states yet. See `ledger.rs` module docs.
+  same block"; there are no tx size/weight limits. `Ledger::with_finality` prunes
+  the per-block state of final blocks (more than `finality_depth` blue score below
+  the tip) and rejects blocks built on final history; re-orgs above the finality
+  point are implicit (`ledger_state` follows the selected tip, no revert). Pruning
+  is of the per-block *state* only — the DAG stays append-only (DAG/`past`-set
+  pruning waits on the reachability oracle). See `ledger.rs` module docs.
 - **Insert-time validation** now has both layers. `Dag::with_validator` +
   `TxStructureValidator` reject malformed/structurally-invalid blocks; `Ledger`
   additionally runs the **stateful** rules (input existence, signatures, value
@@ -209,12 +215,14 @@ is a library plus a binary (`serve`/`demo`).
       the ordering per-block UTXO state composes along.
 - [x] Per-block UTXO state built incrementally from each block's selected parent
       (`Ledger`), matching `apply_dag`; enables stateful validation at insert.
-- [ ] Incremental re-orgs / state revert + pruning (finality depth); `Ledger` is
-      append-only today and stores each block's state in full.
+- [x] Finality-depth pruning + re-orgs (`Ledger::with_finality`): prune the
+      per-block state of final blocks, reject blocks built on final history, and
+      follow the selected tip (implicit re-org, no revert).
 - [x] Persistence: replay-log snapshots of the DAG and ledger
       (`Dag`/`Ledger` `write_snapshot`/`read_snapshot`) — state recomputed on load.
 - [ ] Reachability oracle to replace full per-block `past` sets (interval labels +
-      future-covering sets); also rewires mergeset computation and the ordering key.
+      future-covering sets); also rewires mergeset computation and the ordering key,
+      and unlocks DAG-level (not just state) pruning.
 - [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
 - [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
       `serve`/`demo`, snapshot-backed).
