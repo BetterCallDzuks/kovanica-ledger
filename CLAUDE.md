@@ -124,12 +124,21 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   the `Dag`'s backing — the per-block `past` sets are gone; each block keeps only
   its `past_size` (the ancestor *count*, all the topological sort key needs), and
   the mergeset is recomputed by a `sp`-bounded backward walk over parent edges
-  (`Dag::mergeset_ordered`). The oracle is currently **rebuilt from scratch after
-  every insert** (an O(n²) pass); incremental maintenance with interval
-  **reindexing** is the remaining optimisation. Correctness is guarded by a
-  differential test against an independent naive parent-walk over random
-  adversarial DAGs, plus the whole consensus/ledger suite (unchanged by the
-  cutover). See `dag.rs` and `reachability.rs` module docs.
+  (`Dag::mergeset_ordered`). The oracle is maintained **incrementally**:
+  `Dag::insert` calls `Reachability::add_block` to fold in just the one new block
+  — the **Kaspa reachability** scheme (interval allocation with **reindexing** of
+  the minimal enclosing subtree, plus incremental future-covering-set insertion
+  over the block's mergeset) — never rebuilding from scratch. Because the DAG is
+  append-only and each block's selected parent is fixed at insert, the new block
+  is always a fresh tree **leaf**, so existing tree edges never move. The
+  from-scratch `Reachability::build` is kept to seed genesis and as an independent
+  test oracle. Correctness is guarded by a differential test against an
+  independent naive parent-walk, an "incremental oracle == freshly-built oracle
+  after every insert" test, reindex-stressing scenarios (long chains, wide fans,
+  deep+wide mixes), and the whole consensus/ledger suite (unchanged by the
+  cutover). Still open: incremental interval **reindexing amortisation** tuning
+  and the DAG-level (`past`-set) pruning the oracle unlocks. See `dag.rs` and
+  `reachability.rs` module docs.
 - **In-memory working state**, with **replay-log persistence**: `Dag`/`Ledger`
   `write_snapshot`/`read_snapshot` serialise only `k`, the subsidy, and the blocks
   in topological order; loading replays inserts so all derived state (the
@@ -258,10 +267,15 @@ is a library plus a binary (`serve`/`demo`).
 - [x] Reachability oracle (`reachability::Reachability`): interval-tree +
       future-covering sets, now the `Dag`'s backing for ancestor queries and
       mergeset computation. The per-block `past` sets are dropped (each block keeps
-      only `past_size`); mergeset is a selected-parent-bounded backward walk. The
-      oracle is rebuilt after each insert; incremental maintenance with interval
-      **reindexing** (and the DAG-level pruning it unlocks) is the remaining
-      optimisation.
+      only `past_size`); mergeset is a selected-parent-bounded backward walk.
+- [x] Incremental reachability maintenance (Kaspa reachability / interval
+      **reindexing**): `Dag::insert` folds in just the one new block via
+      `Reachability::add_block` (tree-interval allocation, subtree reindexing on
+      capacity exhaustion, future-covering-set insertion over the mergeset)
+      instead of rebuilding the oracle from scratch each insert. Behaviour-
+      preserving — guarded by an "incremental == freshly-built after every insert"
+      differential test plus reindex-stressing scenarios. Still open: the DAG-level
+      `past`-set / interval-reindex pruning this unlocks.
 - [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
 - [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
       `serve`/`demo`, snapshot-backed).

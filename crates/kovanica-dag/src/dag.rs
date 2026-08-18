@@ -12,8 +12,9 @@
 //! oracle (interval-labelled selected-parent tree + future-covering sets), so no
 //! per-block `past` set is stored — each block keeps only its `past_size` (the
 //! *count* of its ancestors), which is enough for the topological sort key. The
-//! oracle is rebuilt after every insert; incremental maintenance with interval
-//! reindexing is a further optimisation (see [`crate::reachability`]).
+//! oracle is maintained **incrementally**: each insert folds in just the one new
+//! block (Kaspa reachability / interval reindexing) rather than rebuilding from
+//! scratch (see [`crate::reachability`]).
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -144,7 +145,7 @@ pub struct Dag {
     /// Blocks with no children yet — the current tips.
     tips: BTreeSet<BlockId>,
     /// Reachability oracle backing `is_ancestor` and mergeset computation,
-    /// rebuilt after every insert.
+    /// maintained incrementally on each insert (see [`crate::reachability`]).
     reach: Reachability,
     /// Optional payload-aware validator run on each [`Dag::insert`]. See
     /// [`crate::validation`].
@@ -478,6 +479,16 @@ impl Dag {
             + 1
             + (ghostdag.mergeset_blues.len() + ghostdag.mergeset_reds.len()) as u64;
 
+        // The full mergeset (blues + reds), captured before `ghostdag` is moved
+        // into the node — this is what the oracle needs to update its
+        // future-covering sets.
+        let mergeset: Vec<BlockId> = ghostdag
+            .mergeset_blues
+            .iter()
+            .chain(&ghostdag.mergeset_reds)
+            .copied()
+            .collect();
+
         // Wire the block in: attach to parents, refresh tips.
         for parent in block.parents() {
             self.nodes.get_mut(parent).unwrap().children.insert(id);
@@ -495,9 +506,9 @@ impl Dag {
             },
         );
 
-        // Rebuild the reachability oracle to include the new block.
-        let reach = Reachability::build(self);
-        self.reach = reach;
+        // Fold the one new block into the reachability oracle incrementally
+        // (Kaspa reachability / interval reindexing), rather than rebuilding it.
+        self.reach.add_block(id, sp, &mergeset);
         Ok(id)
     }
 }
