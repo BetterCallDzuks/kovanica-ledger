@@ -218,6 +218,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kovanica-node"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "kovanica-dag",
+ "kovanica-state",
+]
+
+[[package]]
 name = "kovanica-state"
 version = "0.1.0"
 dependencies = [
