@@ -29,16 +29,16 @@
 //! use kovanica_state::{encode_block_payload, Transaction, TxOutput, KeyPair, TxStructureValidator};
 //!
 //! let alice = KeyPair::from_u64(1);
-//! let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+//! let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
 //! let mut dag = Dag::with_validator(3, genesis, Box::new(TxStructureValidator));
 //! let genesis_id = dag.genesis();
 //!
 //! // A well-formed coinbase-carrying block is accepted.
 //! let cb = Transaction::coinbase(vec![TxOutput::new(50, alice.address())], b"h1".to_vec());
-//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, encode_block_payload(&[cb]))).is_ok());
+//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, 0, encode_block_payload(&[cb]))).is_ok());
 //!
 //! // A block whose payload is not valid transaction encoding is rejected at insert.
-//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, b"not-transactions".to_vec())).is_err());
+//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, 0, b"not-transactions".to_vec())).is_err());
 //! ```
 //!
 //! [`UtxoSet`]: crate::utxo::UtxoSet

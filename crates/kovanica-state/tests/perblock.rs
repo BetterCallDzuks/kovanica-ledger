@@ -67,7 +67,7 @@ fn per_block_state_advances_with_each_block() {
 
     let tx = transfer(coin, &alice, &bob.address(), 200, 500);
     let b1 = ledger
-        .insert(vec![genesis], 1, 0, &[tx])
+        .insert(vec![genesis], 1, 0, 0, &[tx])
         .expect("valid transfer");
 
     // Genesis's view is unchanged; b1's view reflects the transfer.
@@ -92,6 +92,7 @@ fn double_spending_an_ancestor_output_is_rejected_at_insert() {
             vec![genesis],
             1,
             0,
+            0,
             &[transfer(coin, &alice, &bob.address(), 500, 500)],
         )
         .expect("first spend is valid");
@@ -101,6 +102,7 @@ fn double_spending_an_ancestor_output_is_rejected_at_insert() {
         .insert(
             vec![b1],
             1,
+            0,
             0,
             &[transfer(coin, &alice, &bob.address(), 500, 500)],
         )
@@ -129,7 +131,9 @@ fn forged_signature_is_rejected_at_insert() {
         vec![TxOutput::new(500, mallory.address())],
         b"forge".to_vec(),
     );
-    let err = ledger.insert(vec![genesis], 1, 0, &[forged]).unwrap_err();
+    let err = ledger
+        .insert(vec![genesis], 1, 0, 0, &[forged])
+        .unwrap_err();
     assert!(matches!(
         err,
         LedgerInsertError::State(LedgerError::BadSignature { .. })
@@ -154,6 +158,7 @@ fn parallel_conflicting_blocks_are_both_admitted_then_resolved_at_merge() {
             vec![genesis],
             1,
             0,
+            0,
             &[transfer(coin, &alice, &bob.address(), 500, 500)],
         )
         .expect("valid in its own view");
@@ -161,6 +166,7 @@ fn parallel_conflicting_blocks_are_both_admitted_then_resolved_at_merge() {
         .insert(
             vec![genesis],
             1,
+            0,
             0,
             &[transfer(coin, &alice, &carol.address(), 500, 500)],
         )
@@ -172,7 +178,7 @@ fn parallel_conflicting_blocks_are_both_admitted_then_resolved_at_merge() {
 
     // Merge them (empty payload). In the merge's view exactly one spend wins.
     let merge = ledger
-        .insert(vec![to_bob, to_carol], 1, 0, &[])
+        .insert(vec![to_bob, to_carol], 1, 0, 0, &[])
         .expect("merge is valid");
     let merge_state = ledger.state(&merge).unwrap();
     let bob_bal = merge_state.balance(&bob.address());
@@ -195,13 +201,13 @@ fn ledger_state_matches_batch_apply_dag() {
     // A chain: alice → bob (with change), then bob forwards to carol.
     let a_to_b = transfer(coin, &alice, &bob.address(), 300, 500);
     let bob_coin = OutPoint::new(a_to_b.id(), 0);
-    let b1 = ledger.insert(vec![genesis], 1, 0, &[a_to_b]).unwrap();
+    let b1 = ledger.insert(vec![genesis], 1, 0, 0, &[a_to_b]).unwrap();
     let b_to_c = Transaction::signed(
         &[(bob_coin, &bob)],
         vec![TxOutput::new(300, carol.address())],
         Vec::new(),
     );
-    let b2 = ledger.insert(vec![b1], 1, 0, &[b_to_c]).unwrap();
+    let b2 = ledger.insert(vec![b1], 1, 0, 0, &[b_to_c]).unwrap();
 
     // A parallel side block off b1: alice spends her change output (index 1 of
     // a_to_b) to carol. Valid in b1's view, where the change exists.
@@ -211,10 +217,10 @@ fn ledger_state_matches_batch_apply_dag() {
         vec![TxOutput::new(200, carol.address())],
         b"side".to_vec(),
     );
-    let side_block = ledger.insert(vec![b1], 1, 0, &[side]).unwrap();
+    let side_block = ledger.insert(vec![b1], 1, 0, 0, &[side]).unwrap();
 
     // Merge the two tips.
-    ledger.insert(vec![b2, side_block], 1, 0, &[]).unwrap();
+    ledger.insert(vec![b2, side_block], 1, 0, 0, &[]).unwrap();
 
     let incremental = ledger.ledger_state();
     let batch = apply_dag(ledger.dag(), SUBSIDY).utxo;
@@ -227,8 +233,8 @@ fn insert_reports_dag_errors() {
     let (mut ledger, _coin) = funded_ledger(&alice, 500);
 
     // A parent that isn't in the DAG surfaces as a DAG error, not a state error.
-    let bogus_parent = kovanica_dag::Block::genesis(1, 0, b"nope".to_vec()).id();
-    let err = ledger.insert(vec![bogus_parent], 1, 0, &[]).unwrap_err();
+    let bogus_parent = kovanica_dag::Block::genesis(1, 0, 0, b"nope".to_vec()).id();
+    let err = ledger.insert(vec![bogus_parent], 1, 0, 0, &[]).unwrap_err();
     assert!(matches!(
         err,
         LedgerInsertError::Dag(DagError::MissingParent(_))

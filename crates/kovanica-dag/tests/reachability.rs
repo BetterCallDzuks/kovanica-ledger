@@ -29,7 +29,7 @@ impl Rng {
 /// references 1–3 distinct existing blocks and has a small random work, producing
 /// varied shapes (chains, wide forks, deep merges).
 fn random_dag(seed: u64, n: usize, k: u16) -> (Dag, Vec<BlockId>) {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let genesis_id = genesis.id();
     let mut dag = Dag::new(k, genesis);
     let mut ids = vec![genesis_id];
@@ -49,7 +49,13 @@ fn random_dag(seed: u64, n: usize, k: u16) -> (Dag, Vec<BlockId>) {
         }
         let work = 1 + rng.below(4) as u128;
         let id = dag
-            .insert(Block::new(parents, work, 0, format!("b{i}").into_bytes()))
+            .insert(Block::new(
+                parents,
+                work,
+                0,
+                0,
+                format!("b{i}").into_bytes(),
+            ))
             .expect("random block is valid");
         ids.push(id);
     }
@@ -164,7 +170,7 @@ fn incremental_matches_fresh_after_every_insert() {
         let k = (seed % 5) as u16;
         let n = 40 + (seed as usize % 40);
 
-        let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+        let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
         let genesis_id = genesis.id();
         let mut dag = Dag::new(k, genesis);
         let mut ids = vec![genesis_id];
@@ -184,7 +190,13 @@ fn incremental_matches_fresh_after_every_insert() {
             }
             let work = 1 + rng.below(4) as u128;
             let id = dag
-                .insert(Block::new(parents, work, 0, format!("b{i}").into_bytes()))
+                .insert(Block::new(
+                    parents,
+                    work,
+                    0,
+                    0,
+                    format!("b{i}").into_bytes(),
+                ))
                 .expect("random block is valid");
             ids.push(id);
             // Behaviour preservation must hold at every step, not just the end.
@@ -201,14 +213,20 @@ fn incremental_matches_fresh_after_every_insert() {
 /// reallocates the branch. Hundreds of blocks deep guarantees many reindexes.
 #[test]
 fn incremental_survives_a_long_chain_with_reindexing() {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let mut dag = Dag::new(3, genesis);
     let mut ids = vec![dag.genesis()];
     for i in 0..600 {
         let parent = *ids.last().unwrap();
         ids.push(
-            dag.insert(Block::new(vec![parent], 1, 0, format!("c{i}").into_bytes()))
-                .unwrap(),
+            dag.insert(Block::new(
+                vec![parent],
+                1,
+                0,
+                0,
+                format!("c{i}").into_bytes(),
+            ))
+            .unwrap(),
         );
     }
     // Only the O(n^2) incremental-vs-fresh check here (naive ground truth, an
@@ -222,20 +240,20 @@ fn incremental_survives_a_long_chain_with_reindexing() {
 /// block merges every child, exercising a large mergeset / future-covering set.
 #[test]
 fn incremental_survives_a_wide_fan_with_reindexing() {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let mut dag = Dag::new(400, genesis); // k large so the fan stays all-blue
     let g = dag.genesis();
     let mut ids = vec![g];
     let mut children: Vec<BlockId> = Vec::new();
     for i in 0..400 {
         let id = dag
-            .insert(Block::new(vec![g], 1, 0, format!("w{i}").into_bytes()))
+            .insert(Block::new(vec![g], 1, 0, 0, format!("w{i}").into_bytes()))
             .unwrap();
         children.push(id);
         ids.push(id);
     }
     let merge = dag
-        .insert(Block::new(children, 1, 0, b"merge".to_vec()))
+        .insert(Block::new(children, 1, 0, 0, b"merge".to_vec()))
         .unwrap();
     ids.push(merge);
     assert_incremental_equals_fresh(&dag, &ids);
@@ -246,7 +264,7 @@ fn incremental_survives_a_wide_fan_with_reindexing() {
 /// non-trivial future-covering sets.
 #[test]
 fn incremental_survives_deep_and_wide_mix() {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let mut dag = Dag::new(8, genesis);
     let mut ids = vec![dag.genesis()];
     let mut spine = dag.genesis();
@@ -259,6 +277,7 @@ fn incremental_survives_deep_and_wide_mix() {
                     vec![spine],
                     1,
                     0,
+                    0,
                     format!("l{level}s{s}").into_bytes(),
                 ))
                 .unwrap();
@@ -270,6 +289,7 @@ fn incremental_survives_deep_and_wide_mix() {
             .insert(Block::new(
                 side,
                 1,
+                0,
                 0,
                 format!("l{level}spine").into_bytes(),
             ))
@@ -295,14 +315,20 @@ fn incremental_matches_on_larger_random_dags() {
 
 #[test]
 fn matches_on_a_linear_chain() {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let mut dag = Dag::new(3, genesis);
     let mut ids = vec![dag.genesis()];
     for i in 0..20 {
         let parent = *ids.last().unwrap();
         ids.push(
-            dag.insert(Block::new(vec![parent], 1, 0, format!("c{i}").into_bytes()))
-                .unwrap(),
+            dag.insert(Block::new(
+                vec![parent],
+                1,
+                0,
+                0,
+                format!("c{i}").into_bytes(),
+            ))
+            .unwrap(),
         );
     }
     assert_oracle_matches(&dag, &ids);
@@ -310,17 +336,17 @@ fn matches_on_a_linear_chain() {
 
 #[test]
 fn matches_on_a_wide_fork_and_merge() {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let mut dag = Dag::new(2, genesis);
     let g = dag.genesis();
     let parallel: Vec<BlockId> = (0..8)
         .map(|i| {
-            dag.insert(Block::new(vec![g], 1, 0, format!("w{i}").into_bytes()))
+            dag.insert(Block::new(vec![g], 1, 0, 0, format!("w{i}").into_bytes()))
                 .unwrap()
         })
         .collect();
     let merge = dag
-        .insert(Block::new(parallel.clone(), 1, 0, b"m".to_vec()))
+        .insert(Block::new(parallel.clone(), 1, 0, 0, b"m".to_vec()))
         .unwrap();
 
     let mut ids = vec![g];
@@ -331,21 +357,21 @@ fn matches_on_a_wide_fork_and_merge() {
 
 #[test]
 fn matches_on_a_diamond() {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let mut dag = Dag::new(3, genesis);
     let g = dag.genesis();
     let a = dag
-        .insert(Block::new(vec![g], 1, 0, b"a".to_vec()))
+        .insert(Block::new(vec![g], 1, 0, 0, b"a".to_vec()))
         .unwrap();
     let b = dag
-        .insert(Block::new(vec![g], 1, 0, b"b".to_vec()))
+        .insert(Block::new(vec![g], 1, 0, 0, b"b".to_vec()))
         .unwrap();
     let m = dag
-        .insert(Block::new(vec![a, b], 1, 0, b"m".to_vec()))
+        .insert(Block::new(vec![a, b], 1, 0, 0, b"m".to_vec()))
         .unwrap();
     // A tail block off only one side, to exercise a non-tree covering path.
     let c = dag
-        .insert(Block::new(vec![a], 1, 0, b"c".to_vec()))
+        .insert(Block::new(vec![a], 1, 0, 0, b"c".to_vec()))
         .unwrap();
     assert_oracle_matches(&dag, &[g, a, b, m, c]);
 }

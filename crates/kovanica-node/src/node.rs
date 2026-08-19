@@ -12,10 +12,10 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kovanica_dag::{BlockId, Dag, DagError};
+use kovanica_dag::{pow, Block, BlockId, Dag, DagError};
 use kovanica_state::{
-    apply_block, decode_block_payload, Address, KeyPair, Ledger, LedgerError, LedgerInsertError,
-    OutPoint, Transaction, TxId, TxOutput,
+    apply_block, decode_block_payload, encode_block_payload, Address, KeyPair, Ledger, LedgerError,
+    LedgerInsertError, OutPoint, Transaction, TxId, TxOutput,
 };
 
 use crate::mempool::Mempool;
@@ -112,6 +112,9 @@ pub struct BlockRecord {
     pub work: u128,
     /// The block's timestamp, in milliseconds.
     pub timestamp_ms: u64,
+    /// The block's proof-of-work nonce. Carried so a peer reconstructs the exact
+    /// same id (and, under enforced PoW, the block still meets its target).
+    pub nonce: u64,
     /// The block's transactions.
     pub txs: Vec<Transaction>,
 }
@@ -164,6 +167,47 @@ impl Node {
             .max()
             .map_or(0, |latest| latest + 1);
         self.now_ms().max(floor)
+    }
+
+    /// The proof-of-work nonce to stamp on a new block built on `parents` with
+    /// `work`, `timestamp_ms`, and transactions `txs`.
+    ///
+    /// When proof-of-work is enforced on the ledger's DAG, mine the block —
+    /// Nakamoto-style hash-target search over the nonce
+    /// ([`kovanica_dag::pow::mine`]) — so its id meets its `work` target and it
+    /// passes insert; otherwise `0` (no mining). The template here must be
+    /// byte-identical to the block [`Ledger::insert`] will build (same parents,
+    /// work, timestamp, and payload encoding) so the winning nonce carries over
+    /// to exactly the same id.
+    fn mine_nonce(
+        dag: &Dag,
+        parents: &[BlockId],
+        work: u128,
+        timestamp_ms: u64,
+        txs: &[Transaction],
+    ) -> u64 {
+        if !dag.proof_of_work_enabled() {
+            return 0;
+        }
+        let template = Block::new(
+            parents.to_vec(),
+            work,
+            timestamp_ms,
+            0,
+            encode_block_payload(txs),
+        );
+        pow::mine(&template).nonce()
+    }
+
+    /// Enable (or disable) consensus-enforced proof-of-work on the ledger. Once
+    /// enabled, produced blocks are mined and received blocks must meet their
+    /// target. See [`Ledger::set_proof_of_work`]. Errors if not initialised.
+    pub fn set_proof_of_work(&mut self, enabled: bool) -> Result<(), NodeError> {
+        self.ledger
+            .as_mut()
+            .ok_or(NodeError::NotInitialized)?
+            .set_proof_of_work(enabled);
+        Ok(())
     }
 
     /// Whether a genesis has been created.
@@ -271,14 +315,17 @@ impl Node {
     pub fn send(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<Sent, NodeError> {
         let tx = self.build_transfer(from_seed, amount, to_seed)?;
         let tx_id = tx.id();
-        // Compute parents / timestamp / work while holding the shared borrow (the
-        // wall-clock timestamp needs `&self`), before the `&mut` insert.
+        // Compute parents / timestamp / work / nonce while holding the shared
+        // borrow (the wall-clock timestamp needs `&self`, and mining needs the
+        // DAG's PoW switch), before the `&mut` insert.
         let parents = self.ledger()?.dag().tips();
         let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
-        let work = self.ledger()?.dag().next_work_target(&parents).unwrap_or(1);
+        let dag = self.ledger()?.dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
-            .insert(parents, work, timestamp, &[tx])
+            .insert(parents, work, timestamp, nonce, &[tx])
             .map_err(NodeError::Insert)?;
         Ok(Sent { block, tx: tx_id })
     }
@@ -335,21 +382,17 @@ impl Node {
             return Ok(None);
         }
 
-        // Compute parents / timestamp / work under a shared borrow (the wall-clock
-        // timestamp needs `&self`) before taking the `&mut` insert.
-        let parents = self.ledger.as_ref().expect("checked above").dag().tips();
-        let timestamp =
-            self.next_timestamp(self.ledger.as_ref().expect("checked above").dag(), &parents);
-        let work = self
-            .ledger
-            .as_ref()
-            .expect("checked above")
-            .dag()
-            .next_work_target(&parents)
-            .unwrap_or(1);
+        // Compute parents / timestamp / work / nonce under a shared borrow (the
+        // wall-clock timestamp needs `&self`, and mining needs the DAG's PoW
+        // switch) before taking the `&mut` insert.
+        let dag = self.ledger.as_ref().expect("checked above").dag();
+        let parents = dag.tips();
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &selected);
         let ledger = self.ledger.as_mut().expect("checked above");
         let block = ledger
-            .insert(parents, work, timestamp, &selected)
+            .insert(parents, work, timestamp, nonce, &selected)
             .map_err(NodeError::Insert)?;
         self.mempool.remove_all(&selected_ids);
         Ok(Some(block))
@@ -364,6 +407,7 @@ impl Node {
             parents: block.parents().to_vec(),
             work: block.work(),
             timestamp_ms: block.timestamp_ms(),
+            nonce: block.nonce(),
             txs,
         })
     }
@@ -404,6 +448,7 @@ impl Node {
             record.parents,
             record.work,
             record.timestamp_ms,
+            record.nonce,
             &record.txs,
         ) {
             Ok(id) => Ok(id),

@@ -9,10 +9,14 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > finality-depth pruning / re-orgs (`crates/kovanica-state`); and a runnable node
 > binary with a line RPC, a
 > mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
-> Difficulty is both an algorithm (`kovanica-dag::difficulty`) and, now,
+> **Proof-of-work is real and opt-in**: blocks carry a `nonce`, and
+> `Dag::set_proof_of_work(true)` makes `Dag::insert` require each block's id to
+> meet its `work` target (Nakamoto-style `H * work < 2^256`, so `work` = expected
+> hashes). Difficulty is both an algorithm (`kovanica-dag::difficulty`) and, now,
 > **consensus-enforced**: blocks carry a `timestamp`, and an opt-in policy
 > (`Dag::set_difficulty`) requires each block's `work` to equal the target its
-> past implies and its timestamp not to precede any parent's. Separately, the
+> past implies and its timestamp not to precede any parent's; with PoW on too, the
+> block must actually be mined to that work. Separately, the
 > **node** now enforces a wall-clock future-time bound on block timestamps
 > (`Node::receive_block` rejects a block dated more than two hours ahead of the
 > local clock) — deliberately node policy, not a pure function of the DAG. Still
@@ -68,18 +72,20 @@ crates/
   kovanica-dag/                The DAG + GHOSTDAG consensus core (first slice)
     src/
       lib.rs                   Crate docs + re-exports + a doctest quick tour
-      block.rs                 Block (multi-parent vertex, work + timestamp) and BlockId (BLAKE3 hash)
+      block.rs                 Block (multi-parent vertex, work + timestamp + nonce) and BlockId (BLAKE3 hash)
       dag.rs                   Dag store: insert/validate, oracle-backed reachability + mergeset, past_size, tips, GhostdagData, preview(), chain_key, set_difficulty/next_work_target
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
       snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
       difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm); enforced via Dag::set_difficulty
+      pow.rs                   meets_target()/mine(): Nakamoto hash-target proof-of-work (H*work < 2^256); enforced via Dag::set_proof_of_work
       reachability.rs          Reachability oracle: interval-tree + future-covering sets (the Dag's backing for is_ancestor + mergeset)
     tests/
       consensus.rs             Integration + adversarial tests (wide fork, determinism, k-cluster invariant, validator hook)
       reachability.rs          Differential: Dag/oracle is_ancestor == naive parent-walk over random adversarial DAGs
       difficulty.rs            Integration + adversarial: enforced work/timestamp (understate/overstate/backdate rejected, target deterministic)
+      pow.rs                   Integration + adversarial: enforced proof-of-work (unmined rejected, genesis exempt, off-by-default, composes with difficulty)
   kovanica-state/              UTXO ledger applied in GHOSTDAG order (second slice)
     src/
       lib.rs                   Crate docs + re-exports + an end-to-end doctest
@@ -172,9 +178,23 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   DAG (via `Dag::preview`), so a block invalid in its own view is rejected at
   insert. Two *parallel* blocks that spend the same output are each valid in their
   own view and both admitted; their conflict resolves only in a merger's view.
+- **Proof-of-work** is now real, and opt-in. `Block` carries a `nonce` (in the
+  canonical id encoding); `pow::meets_target(id, work)` is the
+  Nakamoto/Bitcoin-style hash-target rule — the id read as a big-endian 256-bit
+  integer `H` must satisfy `H * work < 2^256`, so `work` is the *expected number
+  of hashes* to find the block (a fraction `1/work` pass) and heavier blocks are
+  genuinely harder, making blue work measure real spent hash power. The 256×128
+  check is dependency-free limb arithmetic. `Dag::set_proof_of_work(true)` opts a
+  DAG into **enforcement**: `Dag::insert` then rejects any non-genesis block whose
+  id does not meet its target (`DagError::InsufficientProofOfWork`); genesis is
+  exempt. `pow::mine` searches the nonce; `Ledger::set_proof_of_work` threads the
+  switch through the state layer and the node mines produced blocks when it is on.
+  **Off by default**, so a DAG that does not opt in accepts any nonce, exactly as
+  before. PoW and difficulty are independent, composable switches (with both on,
+  difficulty pins `work` and PoW requires the block to be mined to it).
 - **Difficulty** now has both the algorithm and consensus enforcement. `Block`
-  carries a `timestamp_ms` (in the canonical id encoding); there is still no
-  proof-of-work, so `work` is caller-set *unless* difficulty is enabled.
+  carries a `timestamp_ms` (in the canonical id encoding); `work` is caller-set
+  *unless* difficulty is enabled.
   `difficulty::Retarget::next_work` is the retargeting *algorithm*;
   `Dag::set_difficulty(retarget)` opts a DAG into **enforcement**, after which
   `Dag::insert` requires every non-genesis block's `work` to equal
@@ -297,3 +317,11 @@ is a library plus a binary (`serve`/`demo`).
       injectable (`Node::set_now_ms`) for deterministic tests; produced blocks
       stamp wall-clock now clamped monotone above their parents
       (`crates/kovanica-node/tests/timestamps.rs`).
+- [x] Real proof-of-work (`kovanica-dag::pow`): `Block` carries a `nonce`, and
+      `pow::meets_target` is the Nakamoto hash-target rule (`H * work < 2^256`,
+      dependency-free 256×128 limb arithmetic), so `work` = expected hashes and
+      blue work measures spent hash power. `Dag::set_proof_of_work(true)` opts a
+      DAG into enforcement (`Dag::insert` → `InsufficientProofOfWork`; genesis
+      exempt); `pow::mine` searches the nonce; threaded through
+      `Ledger::set_proof_of_work` and the node's miner. Opt-in and composable with
+      difficulty (`crates/kovanica-dag/tests/pow.rs`).
