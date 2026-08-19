@@ -16,8 +16,9 @@
 //! transactions, [`Node::produce_block`] packs the valid ones into a block, and
 //! blocks gossip between nodes ([`net::gossip`] in-process, or
 //! [`net::serve_blocks`] / [`net::pull_blocks`] over TCP) so peers converge on
-//! the same DAG. There is no peer discovery or continuous gossip loop yet (later
-//! slices). Actors are integer *seeds* the node signs for — a demo convenience,
+//! the same DAG. [`p2p::Mesh`] is the continuous overlay: peer discovery via
+//! hellos, a delayed relay loop, and tx (not just block) dissemination.
+//! Actors are integer *seeds* the node signs for — a demo convenience,
 //! not how a real node handles keys (see [`node`]).
 //!
 //! ```
@@ -34,8 +35,10 @@
 pub mod mempool;
 pub mod net;
 pub mod node;
+pub mod p2p;
 pub mod rpc;
 
 pub use mempool::Mempool;
 pub use net::NetError;
 pub use node::{BlockRecord, Node, NodeError, Sent};
+pub use p2p::{GossipEvent, GossipKind, Mesh, P2pError};

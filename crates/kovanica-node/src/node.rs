@@ -327,6 +327,7 @@ impl Node {
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
             .map_err(NodeError::Insert)?;
+        self.evict_mempool();
         Ok(Sent { block, tx: tx_id })
     }
 
@@ -354,8 +355,10 @@ impl Node {
     /// current tips, insert it, and drop the included transactions.
     ///
     /// Candidates are tried in deterministic (id) order against the current UTXO
-    /// state; any that conflict are left in the mempool. Returns the new block id,
-    /// or `None` if nothing could be included.
+    /// state; any that conflict are not included. After insert, the mempool
+    /// evicts transactions whose inputs are gone from the selected-tip view
+    /// (permanently invalid on this branch). Returns the new block id, or
+    /// `None` if nothing could be included.
     pub fn produce_block(&mut self) -> Result<Option<BlockId>, NodeError> {
         if self.ledger.is_none() {
             return Err(NodeError::NotInitialized);
@@ -395,7 +398,21 @@ impl Node {
             .insert(parents, work, timestamp, nonce, &selected)
             .map_err(NodeError::Insert)?;
         self.mempool.remove_all(&selected_ids);
+        self.evict_mempool();
         Ok(Some(block))
+    }
+
+    /// A pending mempool transaction by id, if present.
+    pub fn mempool_tx(&self, id: &TxId) -> Option<Transaction> {
+        self.mempool.get(id)
+    }
+
+    fn evict_mempool(&mut self) {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return;
+        };
+        let utxo = ledger.ledger_state();
+        self.mempool.evict_invalid(&utxo);
     }
 
     /// The gossip record for a block, if present.
@@ -451,7 +468,10 @@ impl Node {
             record.nonce,
             &record.txs,
         ) {
-            Ok(id) => Ok(id),
+            Ok(id) => {
+                self.evict_mempool();
+                Ok(id)
+            }
             Err(LedgerInsertError::Dag(DagError::DuplicateBlock(id))) => Ok(id),
             Err(e) => Err(NodeError::Insert(e)),
         }

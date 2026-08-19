@@ -8,7 +8,9 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > with ed25519 spend authorisation, per-block state, snapshot persistence, and
 > finality-depth pruning / re-orgs (`crates/kovanica-state`); and a runnable node
 > binary with a line RPC, a
-> mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
+> mempool, block production, multi-node block gossip, and an in-process
+> continuous overlay (`crates/kovanica-node`: `net` one-shot sync + `p2p::Mesh`
+> with peer discovery, a delayed relay loop, and tx dissemination).
 > **Proof-of-work is real and opt-in**: blocks carry a `nonce`, and
 > `Dag::set_proof_of_work(true)` makes `Dag::insert` require each block's id to
 > meet its `work` target (Nakamoto-style `H * work < 2^256`, so `work` = expected
@@ -20,7 +22,8 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > **node** now enforces a wall-clock future-time bound on block timestamps
 > (`Node::receive_block` rejects a block dated more than two hours ahead of the
 > local clock) — deliberately node policy, not a pure function of the DAG. Still
-> **TODO** (below): continuous p2p gossip with peer discovery.
+> **TODO** (below): wiring the relay loop onto long-lived TCP/WebSocket sessions,
+> and an incremental on-disk store.
 > Keep this file in sync with the code: update it in the same change that adds or
 > moves the structure it describes.
 
@@ -107,18 +110,20 @@ crates/
       node.rs                  Node: Ledger + Mempool; genesis/send/pool/produce/balance/tips/save/load + gossip
       mempool.rs               Mempool: pending txs, deterministic (id) ordering for block assembly
       net.rs                   gossip() (in-process) + serve_blocks/pull_blocks (one-shot TCP sync)
+      p2p.rs                   Mesh: peer discovery (hello), delayed relay loop, block+tx flood
       rpc.rs                   execute_line(): the text command protocol (string in, string out)
       main.rs                  Binary: `serve` (stdin/stdout REPL) and `demo` (scripted scenario)
     tests/
       rpc.rs                   Integration: end-to-end transfers, errors, snapshot round-trip via RPC
       mempool.rs               Integration: pool/produce assembly, conflict partial-inclusion
       network.rs               Integration: multi-node convergence (in-process + conflict + TCP loopback)
+      p2p.rs                   Integration: discovery, relay, tx dissemination, mempool eviction
       timestamps.rs            Integration: wall-clock timestamp policy (pinned clock, monotone stamps, far-future reject)
 ```
 
-Not built yet (**TODO**, add crates under `crates/` as they land): continuous p2p
-gossip with peer discovery — `kovanica-node` today does one-shot block sync
-(pull-all) between two nodes, no peer set or relay loop. Some `crypto` exists
+Not built yet (**TODO**, add crates under `crates/` as they land): long-lived
+TCP/WebSocket sessions for the relay loop (today `p2p::Mesh` is in-process),
+and an incremental on-disk store. Some `crypto` exists
 (ed25519 spend signatures in
 `kovanica-state`); VRF and beyond remain TODO. Update this tree when you add them.
 
@@ -302,8 +307,10 @@ is a library plus a binary (`serve`/`demo`).
 - [x] Mempool + block production (`pool`/`produce`), and multi-node block
       dissemination — in-process `gossip` and a one-shot TCP pull sync — with
       nodes converging on the same DAG (conflicts resolved identically).
-- [ ] Continuous p2p gossip: peer discovery, a relay loop, tx (not just block)
-      dissemination; mempool eviction of permanently-invalid txs.
+- [x] Continuous in-process p2p gossip (`p2p::Mesh`): peer discovery via hello
+      advertisements, a delayed relay loop, tx (not just block) dissemination,
+      and mempool eviction of txs whose inputs are gone from the selected-tip
+      UTXO view. Long-lived TCP/WebSocket sessions for the same loop remain TODO.
 - [x] Difficulty adjustment for `work`: the retargeting algorithm
       (`difficulty::Retarget::next_work`) plus **consensus enforcement**. `Block`
       now carries a `timestamp_ms`; `Dag::set_difficulty` opts a DAG into

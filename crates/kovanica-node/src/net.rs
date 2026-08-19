@@ -10,9 +10,9 @@
 //!
 //! [`gossip`] does one directional catch-up in-process. [`serve_blocks`] /
 //! [`pull_blocks`] do the same over a TCP stream — a minimal one-shot "give me
-//! all your blocks" sync (no peer discovery or continuous gossip yet; those are
-//! later slices). Records are assumed to arrive in topological order, which
-//! [`Node::export`] guarantees.
+//! all your blocks" sync. Continuous gossip with a peer set and a relay loop
+//! lives in [`crate::p2p`]. Records are assumed to arrive in topological order,
+//! which [`Node::export`] guarantees.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};

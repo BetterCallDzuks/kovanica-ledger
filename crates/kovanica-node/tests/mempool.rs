@@ -49,7 +49,8 @@ fn non_conflicting_entries_from_two_actors_pack_together() {
 #[test]
 fn conflicting_pool_entries_are_partially_included() {
     // Both pooled transfers spend actor 1's single 1000 output, so only one can
-    // be included; the loser stays pending (it references a now-spent output).
+    // be included. The loser is then evicted: its input is gone from the
+    // selected-tip UTXO, so it can never apply on this branch.
     let mut node = Node::new();
     run(&mut node, "genesis 3 1000 1000 1");
     run(&mut node, "pool 1 400 2");
@@ -59,11 +60,10 @@ fn conflicting_pool_entries_are_partially_included() {
     assert!(run(&mut node, "produce").starts_with("ok block "));
     let (b2, b3) = (bal(&mut node, 2), bal(&mut node, 3));
     assert!((b2 == 400 && b3 == 0) || (b2 == 0 && b3 == 300));
-    assert_eq!(run(&mut node, "pending"), "ok 1");
+    assert_eq!(run(&mut node, "pending"), "ok 0");
 
-    // The stranded transfer can never apply (its input is spent).
     assert_eq!(run(&mut node, "produce"), "ok empty");
-    assert_eq!(run(&mut node, "pending"), "ok 1");
+    assert_eq!(run(&mut node, "pending"), "ok 0");
 }
 
 #[test]

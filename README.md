@@ -7,8 +7,10 @@ protocol behind Kaspa).
 
 > Early stage. The block DAG + GHOSTDAG consensus core, a UTXO ledger applied in
 > GHOSTDAG order (with per-block state and snapshot persistence), and a runnable
-> node binary with a mempool and multi-node block gossip are implemented and
-> tested; continuous p2p (peer discovery, relay) is not built yet. See
+> node binary with a mempool, multi-node block gossip, and an in-process
+> continuous overlay (`p2p::Mesh`: peer discovery, relay, tx dissemination) are
+> implemented and tested. Long-lived TCP sessions for that relay loop, and an
+> incremental on-disk store, are not built yet. See
 > [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and roadmap.
 
 ## What's here
@@ -72,8 +74,9 @@ nodes exchange blocks to converge on one DAG — in-process (`net::gossip`) or o
 TCP (`net::serve_blocks` / `pull_blocks`). Produced blocks are stamped with the
 node's wall clock (clamped monotone above their parents), and `receive_block`
 rejects a peer's block dated more than two hours ahead of local time — node
-policy, not pure-DAG consensus. Snapshot-backed via `save`/`load`. Continuous p2p
-(peer discovery, relay) is not built yet.
+policy, not pure-DAG consensus. Snapshot-backed via `save`/`load`. Continuous
+in-process gossip lives in `p2p::Mesh` (peer discovery, delayed relay, tx
+flood); long-lived TCP/WebSocket sessions for that loop are not built yet.
 
 ## Run the node
 

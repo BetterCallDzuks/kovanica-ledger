@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use kovanica_state::{Transaction, TxId};
+use kovanica_state::{Transaction, TxId, UtxoSet};
 
 /// A set of pending transactions.
 #[derive(Debug, Default)]
@@ -40,6 +40,11 @@ impl Mempool {
         self.pending.contains_key(id)
     }
 
+    /// The pending transaction with this id, if present.
+    pub fn get(&self, id: &TxId) -> Option<Transaction> {
+        self.pending.get(id).cloned()
+    }
+
     /// Number of pending transactions.
     pub fn len(&self) -> usize {
         self.pending.len()
@@ -64,12 +69,27 @@ impl Mempool {
             self.pending.remove(id);
         }
     }
+
+    /// Drop transactions that can never be valid against the current selected-tip
+    /// UTXO view: any input that is not currently unspent. A tx whose funding
+    /// output simply has not arrived yet is also dropped — this slice treats
+    /// "missing input" as permanently invalid on *this* branch (a later re-gossip
+    /// can re-introduce it after a re-org). Returns how many were removed.
+    pub fn evict_invalid(&mut self, utxo: &UtxoSet) -> usize {
+        let before = self.pending.len();
+        self.pending.retain(|_, tx| {
+            tx.inputs()
+                .iter()
+                .all(|input| utxo.contains(&input.outpoint))
+        });
+        before - self.pending.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kovanica_state::{KeyPair, OutPoint, TxOutput};
+    use kovanica_state::{KeyPair, OutPoint, TxOutput, UtxoSet};
 
     fn tx(seed: u8) -> Transaction {
         let kp = KeyPair::from_u64(1);
@@ -91,5 +111,21 @@ mod tests {
         let ids: Vec<TxId> = pool.ordered().iter().map(|t| t.id()).collect();
         pool.remove_all(&ids);
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn evict_drops_txs_whose_inputs_are_gone() {
+        let mut pool = Mempool::new();
+        let t = tx(1);
+        let op = t.inputs()[0].outpoint;
+        pool.add(t.clone());
+        assert_eq!(pool.evict_invalid(&UtxoSet::new()), 1);
+        assert!(pool.is_empty());
+
+        pool.add(t);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(op, TxOutput::new(1, KeyPair::from_u64(1).address()));
+        assert_eq!(pool.evict_invalid(&utxo), 0);
+        assert_eq!(pool.len(), 1);
     }
 }
