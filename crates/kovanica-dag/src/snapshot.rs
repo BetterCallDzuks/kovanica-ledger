@@ -133,8 +133,9 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<DagSnapshot, SnapshotError> {
 
 /// Encode a block's reconstruction data: parents, work, timestamp, nonce,
 /// payload (length-prefixed, little-endian). Not the id encoding — this is what
-/// rebuilds the `Block`.
-fn encode_block(block: &Block, buf: &mut Vec<u8>) {
+/// rebuilds the `Block`. Used by the whole-DAG snapshot and the incremental
+/// append-only log.
+pub fn encode_block(block: &Block, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&(block.parents().len() as u64).to_le_bytes());
     for parent in block.parents() {
         buf.extend_from_slice(parent.as_bytes());
@@ -144,6 +145,16 @@ fn encode_block(block: &Block, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&block.nonce().to_le_bytes());
     buf.extend_from_slice(&(block.payload().len() as u64).to_le_bytes());
     buf.extend_from_slice(block.payload());
+}
+
+/// Decode one block from the stored (snapshot / log) encoding.
+pub fn decode_block(bytes: &[u8]) -> Result<Block, SnapshotError> {
+    let mut reader = Reader::new(bytes);
+    let block = reader.read_block()?;
+    if reader.remaining() != 0 {
+        return Err(SnapshotError::TrailingBytes);
+    }
+    Ok(block)
 }
 
 /// A minimal, bounds-checked cursor over snapshot bytes.

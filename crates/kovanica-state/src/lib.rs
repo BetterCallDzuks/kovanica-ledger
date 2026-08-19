@@ -71,6 +71,7 @@
 
 pub mod keys;
 pub mod ledger;
+pub mod store;
 pub mod tx;
 pub mod utxo;
 pub mod validation;
@@ -80,6 +81,7 @@ pub use ledger::{
     apply_block, apply_dag, BlockSummary, Ledger, LedgerError, LedgerInsertError, LedgerRun,
     LedgerSnapshotError,
 };
+pub use store::{LedgerStore, StoreError};
 pub use tx::{
     decode_block_payload, encode_block_payload, DecodeError, OutPoint, Sig, Transaction, TxId,
     TxInput, TxOutput,

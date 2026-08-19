@@ -36,9 +36,11 @@ pub mod mempool;
 pub mod net;
 pub mod node;
 pub mod p2p;
+pub mod relay;
 pub mod rpc;
 
 pub use mempool::Mempool;
 pub use net::NetError;
 pub use node::{BlockRecord, Node, NodeError, Sent};
 pub use p2p::{GossipEvent, GossipKind, Mesh, P2pError};
+pub use relay::{apply_relay, RelayMsg, RelaySession};

@@ -103,18 +103,22 @@ fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(records.len() as u64).to_le_bytes());
     for record in records {
-        buf.extend_from_slice(&(record.parents.len() as u64).to_le_bytes());
-        for parent in &record.parents {
-            buf.extend_from_slice(parent.as_bytes());
-        }
-        buf.extend_from_slice(&record.work.to_le_bytes());
-        buf.extend_from_slice(&record.timestamp_ms.to_le_bytes());
-        buf.extend_from_slice(&record.nonce.to_le_bytes());
-        let payload = encode_block_payload(&record.txs);
-        buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        buf.extend_from_slice(&payload);
+        encode_record(record, &mut buf);
     }
     buf
+}
+
+pub(crate) fn encode_record(record: &BlockRecord, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&(record.parents.len() as u64).to_le_bytes());
+    for parent in &record.parents {
+        buf.extend_from_slice(parent.as_bytes());
+    }
+    buf.extend_from_slice(&record.work.to_le_bytes());
+    buf.extend_from_slice(&record.timestamp_ms.to_le_bytes());
+    buf.extend_from_slice(&record.nonce.to_le_bytes());
+    let payload = encode_block_payload(&record.txs);
+    buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&payload);
 }
 
 fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
@@ -124,29 +128,42 @@ fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
     let count = r.read_count(48)?;
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
-        let n_parents = r.read_count(32)?;
-        let mut parents = Vec::with_capacity(n_parents);
-        for _ in 0..n_parents {
-            parents.push(BlockId::from_bytes(r.read_array::<32>()?));
-        }
-        let work = u128::from_le_bytes(r.read_array::<16>()?);
-        let timestamp_ms = u64::from_le_bytes(r.read_array::<8>()?);
-        let nonce = u64::from_le_bytes(r.read_array::<8>()?);
-        let payload_len = r.read_count(1)?;
-        let payload = r.read_slice(payload_len)?;
-        let txs = decode_block_payload(payload).map_err(|e| NetError::Decode(e.to_string()))?;
-        records.push(BlockRecord {
-            parents,
-            work,
-            timestamp_ms,
-            nonce,
-            txs,
-        });
+        records.push(decode_record(&mut r)?);
     }
     if r.pos != bytes.len() {
         return Err(NetError::Decode("trailing bytes".into()));
     }
     Ok(records)
+}
+
+fn decode_record(r: &mut Cursor<'_>) -> Result<BlockRecord, NetError> {
+    let n_parents = r.read_count(32)?;
+    let mut parents = Vec::with_capacity(n_parents);
+    for _ in 0..n_parents {
+        parents.push(BlockId::from_bytes(r.read_array::<32>()?));
+    }
+    let work = u128::from_le_bytes(r.read_array::<16>()?);
+    let timestamp_ms = u64::from_le_bytes(r.read_array::<8>()?);
+    let nonce = u64::from_le_bytes(r.read_array::<8>()?);
+    let payload_len = r.read_count(1)?;
+    let payload = r.read_slice(payload_len)?;
+    let txs = decode_block_payload(payload).map_err(|e| NetError::Decode(e.to_string()))?;
+    Ok(BlockRecord {
+        parents,
+        work,
+        timestamp_ms,
+        nonce,
+        txs,
+    })
+}
+
+pub(crate) fn decode_one_record(bytes: &[u8]) -> Result<BlockRecord, NetError> {
+    let mut r = Cursor { buf: bytes, pos: 0 };
+    let rec = decode_record(&mut r)?;
+    if r.pos != bytes.len() {
+        return Err(NetError::Decode("trailing bytes".into()));
+    }
+    Ok(rec)
 }
 
 /// A minimal bounds-checked reader.

@@ -59,5 +59,5 @@ pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam};
 pub use difficulty::{Retarget, TimedWork};
 pub use pow::{meets_target, mine};
 pub use reachability::Reachability;
-pub use snapshot::{decode_snapshot, DagSnapshot, SnapshotError};
+pub use snapshot::{decode_block, decode_snapshot, encode_block, DagSnapshot, SnapshotError};
 pub use validation::BlockValidator;

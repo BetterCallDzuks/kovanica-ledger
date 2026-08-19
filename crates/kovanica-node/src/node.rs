@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kovanica_dag::{pow, Block, BlockId, Dag, DagError};
 use kovanica_state::{
     apply_block, decode_block_payload, encode_block_payload, Address, KeyPair, Ledger, LedgerError,
-    LedgerInsertError, OutPoint, Transaction, TxId, TxOutput,
+    LedgerInsertError, LedgerStore, OutPoint, Transaction, TxId, TxOutput,
 };
 
 use crate::mempool::Mempool;
@@ -490,5 +490,39 @@ impl Node {
             Ledger::read_snapshot(&bytes).map_err(|e| NodeError::Snapshot(e.to_string()))?;
         self.ledger = Some(ledger);
         Ok(())
+    }
+
+    /// Write an incremental append-only log of this node's ledger at `path`.
+    pub fn create_log(&self, path: &str) -> Result<LedgerStore, NodeError> {
+        LedgerStore::create(path, self.ledger()?).map_err(|e| NodeError::Io(e.to_string()))
+    }
+
+    /// Rebuild the node from an incremental log at `path`. The store is
+    /// returned so the caller can [`persist_block`](Self::persist_block) new
+    /// inserts without rewriting the file.
+    pub fn load_log(path: &str) -> Result<(Self, LedgerStore), NodeError> {
+        let (store, ledger) =
+            LedgerStore::open(path).map_err(|e| NodeError::Snapshot(e.to_string()))?;
+        Ok((
+            Self {
+                ledger: Some(ledger),
+                mempool: Mempool::new(),
+                clock: Clock::default(),
+            },
+            store,
+        ))
+    }
+
+    /// Append `id`'s block to an open log. No-op-level error if the block is
+    /// missing (it must already be in this node).
+    pub fn persist_block(&self, store: &mut LedgerStore, id: &BlockId) -> Result<(), NodeError> {
+        let block = self
+            .ledger()?
+            .dag()
+            .block(id)
+            .ok_or_else(|| NodeError::Io("unknown block".into()))?;
+        store
+            .append(block)
+            .map_err(|e| NodeError::Io(e.to_string()))
     }
 }

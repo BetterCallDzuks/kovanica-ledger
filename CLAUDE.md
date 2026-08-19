@@ -21,9 +21,7 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > block must actually be mined to that work. Separately, the
 > **node** now enforces a wall-clock future-time bound on block timestamps
 > (`Node::receive_block` rejects a block dated more than two hours ahead of the
-> local clock) — deliberately node policy, not a pure function of the DAG. Still
-> **TODO** (below): wiring the relay loop onto long-lived TCP/WebSocket sessions,
-> and an incremental on-disk store.
+> local clock) — deliberately node policy, not a pure function of the DAG.
 > Keep this file in sync with the code: update it in the same change that adds or
 > moves the structure it describes.
 
@@ -80,7 +78,7 @@ crates/
       ghostdag.rs              compute_ghostdag(): selected parent, mergeset, k-cluster blue/red colouring
       ordering.rs              linearize() (recursive GHOSTDAG order), selected_tip/selected_chain
       validation.rs            BlockValidator trait + Dag::with_validator: pluggable insert-time validation
-      snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence
+      snapshot.rs              Dag::write_snapshot()/read_snapshot(): replay-log persistence; encode_block/decode_block for the incremental log
       difficulty.rs            Retarget::next_work(): difficulty retargeting for block work (algorithm); enforced via Dag::set_difficulty
       pow.rs                   meets_target()/mine(): Nakamoto hash-target proof-of-work (H*work < 2^256); enforced via Dag::set_proof_of_work
       reachability.rs          Reachability oracle: interval-tree + future-covering sets (the Dag's backing for is_ancestor + mergeset)
@@ -96,12 +94,14 @@ crates/
       tx.rs                    Transaction/TxId/OutPoint/TxInput/TxOutput; canonical encoding; sighash
       utxo.rs                  UtxoSet: the unspent-output state, with balance/total_value
       ledger.rs                apply_block()/apply_dag() (batch) + Ledger (per-block state, stateful insert, snapshot, finality/pruning)
+      store.rs                 LedgerStore: incremental append-only on-disk replay log
       validation.rs            TxStructureValidator: context-free structural checks (a BlockValidator)
     tests/
       ledger.rs                Integration + adversarial (double-spend across parallel blocks, order-independence)
       validation.rs            Integration: structural rejection at insert vs stateful rejection at apply
       perblock.rs              Integration: per-block state, stateful insert rejection, apply_dag consistency
       persistence.rs           Integration: Ledger snapshot round-trip (state recomputed by replay)
+      store.rs                 Integration: append-only log grows; reopen matches snapshot
       finality.rs              Integration: finality-depth pruning, deep-reorg rejection, implicit re-org
       difficulty.rs            Integration: Ledger::set_difficulty enforces work/timestamp end-to-end
   kovanica-node/               Runnable node binary, mempool, and block gossip (third slice + multi-node)
@@ -111,6 +111,7 @@ crates/
       mempool.rs               Mempool: pending txs, deterministic (id) ordering for block assembly
       net.rs                   gossip() (in-process) + serve_blocks/pull_blocks (one-shot TCP sync)
       p2p.rs                   Mesh: peer discovery (hello), delayed relay loop, block+tx flood
+      relay.rs                 RelaySession: long-lived TCP framing of hello/block/tx
       rpc.rs                   execute_line(): the text command protocol (string in, string out)
       main.rs                  Binary: `serve` (stdin/stdout REPL) and `demo` (scripted scenario)
     tests/
@@ -118,14 +119,11 @@ crates/
       mempool.rs               Integration: pool/produce assembly, conflict partial-inclusion
       network.rs               Integration: multi-node convergence (in-process + conflict + TCP loopback)
       p2p.rs                   Integration: discovery, relay, tx dissemination, mempool eviction
+      relay.rs                 Integration: persistent TCP session, block/tx over a live socket
       timestamps.rs            Integration: wall-clock timestamp policy (pinned clock, monotone stamps, far-future reject)
 ```
 
-Not built yet (**TODO**, add crates under `crates/` as they land): long-lived
-TCP/WebSocket sessions for the relay loop (today `p2p::Mesh` is in-process),
-and an incremental on-disk store. Some `crypto` exists
-(ed25519 spend signatures in
-`kovanica-state`); VRF and beyond remain TODO. Update this tree when you add them.
+Not built yet (**TODO**): VRF and beyond. Update this tree when you add them.
 
 ### Deliberate first-slice simplifications (do not mistake for the final design)
 
@@ -301,7 +299,9 @@ is a library plus a binary (`serve`/`demo`).
       preserving — guarded by an "incremental == freshly-built after every insert"
       differential test plus reindex-stressing scenarios. Still open: the DAG-level
       `past`-set / interval-reindex pruning this unlocks.
-- [ ] Incremental / streaming on-disk store (today a snapshot is written & read whole).
+- [x] Incremental / streaming on-disk store (`LedgerStore`): append-only replay
+      log; loading recomputes state. Whole-file snapshots remain for portable
+      backups.
 - [x] Runnable node binary + a line RPC over the ledger (`kovanica-node`:
       `serve`/`demo`, snapshot-backed).
 - [x] Mempool + block production (`pool`/`produce`), and multi-node block
@@ -310,7 +310,10 @@ is a library plus a binary (`serve`/`demo`).
 - [x] Continuous in-process p2p gossip (`p2p::Mesh`): peer discovery via hello
       advertisements, a delayed relay loop, tx (not just block) dissemination,
       and mempool eviction of txs whose inputs are gone from the selected-tip
-      UTXO view. Long-lived TCP/WebSocket sessions for the same loop remain TODO.
+      UTXO view.
+- [x] Long-lived TCP relay (`relay::RelaySession`): the same hello/block/tx
+      envelopes as the in-process mesh, framed on a persistent socket. WebSocket
+      sessions remain TODO.
 - [x] Difficulty adjustment for `work`: the retargeting algorithm
       (`difficulty::Retarget::next_work`) plus **consensus enforcement**. `Block`
       now carries a `timestamp_ms`; `Dag::set_difficulty` opts a DAG into
