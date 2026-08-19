@@ -27,7 +27,7 @@
 //! ```
 //! use kovanica_dag::{Block, Dag};
 //!
-//! let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+//! let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
 //! // Reject blocks with an empty payload.
 //! let mut dag = Dag::with_validator(
 //!     3,
@@ -41,8 +41,8 @@
 //!     }),
 //! );
 //! let genesis_id = dag.genesis();
-//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, Vec::new())).is_err());
-//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, b"ok".to_vec())).is_ok());
+//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, 0, Vec::new())).is_err());
+//! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, 0, b"ok".to_vec())).is_ok());
 //! ```
 
 use crate::block::Block;

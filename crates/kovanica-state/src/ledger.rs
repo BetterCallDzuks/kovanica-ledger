@@ -415,7 +415,7 @@ impl Ledger {
         let mut state = UtxoSet::new();
         apply_block(&mut state, genesis_txs, subsidy)?;
 
-        let genesis = Block::genesis(1, 0, encode_block_payload(genesis_txs));
+        let genesis = Block::genesis(1, 0, 0, encode_block_payload(genesis_txs));
         let genesis_id = genesis.id();
         let dag = Dag::with_validator(k, genesis, Box::new(TxStructureValidator));
 
@@ -458,6 +458,15 @@ impl Ledger {
         self.dag.set_difficulty(retarget);
     }
 
+    /// Enable (or disable) consensus-enforced proof-of-work on the underlying
+    /// DAG: every subsequent [`Ledger::insert`] additionally requires the block's
+    /// id to meet its `work` target — i.e. the block must have been mined (its
+    /// `nonce` chosen so the hash is small enough). See
+    /// [`Dag::set_proof_of_work`] and [`kovanica_dag::pow`]. Off by default.
+    pub fn set_proof_of_work(&mut self, enabled: bool) {
+        self.dag.set_proof_of_work(enabled);
+    }
+
     /// The finality depth (blue score below the selected tip). `u64::MAX` means
     /// finality/pruning is disabled.
     pub fn finality_depth(&self) -> u64 {
@@ -492,19 +501,30 @@ impl Ledger {
     }
 
     /// Insert a block referencing `parents`, carrying `work`, `timestamp_ms`,
-    /// and `txs`.
+    /// `nonce`, and `txs`.
     ///
     /// Validates `txs` against the block's view UTXO state and, on success, adds
     /// the block to the DAG and stores its per-block state. On any error the
-    /// ledger and DAG are left unchanged and the block is not added.
+    /// ledger and DAG are left unchanged and the block is not added. When
+    /// proof-of-work is enforced (see [`Ledger::set_proof_of_work`]), `nonce`
+    /// must have been chosen so the block's id meets its `work` target — i.e. the
+    /// caller mined the block (see [`kovanica_dag::pow::mine`]); with PoW off,
+    /// `nonce` is unconstrained (pass `0`).
     pub fn insert(
         &mut self,
         parents: Vec<BlockId>,
         work: u128,
         timestamp_ms: u64,
+        nonce: u64,
         txs: &[Transaction],
     ) -> Result<BlockId, LedgerInsertError> {
-        let block = Block::new(parents, work, timestamp_ms, encode_block_payload(txs));
+        let block = Block::new(
+            parents,
+            work,
+            timestamp_ms,
+            nonce,
+            encode_block_payload(txs),
+        );
 
         // Build the block's view pre-state: its selected parent's state with the
         // mergeset blocks' transactions applied in order. Previewing gets the
@@ -658,6 +678,7 @@ impl Ledger {
                     block.parents().to_vec(),
                     block.work(),
                     block.timestamp_ms(),
+                    block.nonce(),
                     &txs,
                 )
                 .map_err(LedgerSnapshotError::Rebuild)?;

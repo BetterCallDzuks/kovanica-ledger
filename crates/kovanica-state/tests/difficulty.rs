@@ -50,7 +50,7 @@ fn target_work_blocks_are_accepted_wrong_work_is_rejected() {
             .next_work_target(&parents)
             .expect("difficulty is enabled");
         tip = ledger
-            .insert(parents, work, i * 1_000, &[])
+            .insert(parents, work, i * 1_000, 0, &[])
             .unwrap_or_else(|e| panic!("on-target block {i} should be accepted: {e:?}"));
     }
     assert_eq!(ledger.dag().len(), 7); // genesis + 6
@@ -61,7 +61,7 @@ fn target_work_blocks_are_accepted_wrong_work_is_rejected() {
     let target = ledger.dag().next_work_target(&parents).unwrap();
     let before = ledger.dag().len();
     let err = ledger
-        .insert(parents, target + 1, 7_000, &[])
+        .insert(parents, target + 1, 7_000, 0, &[])
         .expect_err("off-target work must be rejected");
     assert!(
         matches!(
@@ -79,12 +79,12 @@ fn a_backdated_block_is_rejected_by_the_ledger() {
     let mut ledger = difficulty_ledger();
     let parents = ledger.dag().tips();
     let work = ledger.dag().next_work_target(&parents).unwrap();
-    let b1 = ledger.insert(parents, work, 5_000, &[]).unwrap();
+    let b1 = ledger.insert(parents, work, 5_000, 0, &[]).unwrap();
 
     // A child timestamped before its parent is rejected on the difficulty rule.
     let work = ledger.dag().next_work_target(&[b1]).unwrap();
     let err = ledger
-        .insert(vec![b1], work, 4_000, &[])
+        .insert(vec![b1], work, 4_000, 0, &[])
         .expect_err("a backdated block must be rejected");
     assert!(
         matches!(

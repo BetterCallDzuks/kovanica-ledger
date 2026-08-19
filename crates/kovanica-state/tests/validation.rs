@@ -20,7 +20,7 @@ fn validated_dag(owner: &KeyPair, funding: u64) -> (Dag, BlockId, OutPoint) {
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
-    let genesis = Block::genesis(1, 0, encode_block_payload(&[coinbase]));
+    let genesis = Block::genesis(1, 0, 0, encode_block_payload(&[coinbase]));
     let genesis_id = genesis.id();
     let dag = Dag::with_validator(3, genesis, Box::new(TxStructureValidator));
     (dag, genesis_id, coin)
@@ -41,6 +41,7 @@ fn well_formed_blocks_are_accepted_and_apply() {
         vec![genesis],
         1,
         0,
+        0,
         encode_block_payload(&[pay]),
     ))
     .expect("a well-formed block passes structural validation at insert");
@@ -59,6 +60,7 @@ fn undecodable_payload_is_rejected_at_insert() {
         .insert(Block::new(
             vec![genesis],
             1,
+            0,
             0,
             b"not-transactions".to_vec(),
         ))
@@ -88,6 +90,7 @@ fn structurally_invalid_transaction_is_rejected_at_insert() {
         .insert(Block::new(
             vec![genesis],
             1,
+            0,
             0,
             encode_block_payload(&[zero_out]),
         ))
@@ -119,6 +122,7 @@ fn stateful_invalidity_still_passes_insert_but_is_caught_on_apply() {
         .insert(Block::new(
             vec![genesis],
             1,
+            0,
             0,
             encode_block_payload(&[forged]),
         ))

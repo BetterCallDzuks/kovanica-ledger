@@ -50,6 +50,9 @@ pub enum DagError {
         timestamp_ms: u64,
         parent_timestamp_ms: u64,
     },
+    /// Proof-of-work is enforced (see [`Dag::set_proof_of_work`]) and the block's
+    /// id does not meet its `work` target — it was not adequately mined.
+    InsufficientProofOfWork { id: BlockId, work: u128 },
 }
 
 impl core::fmt::Display for DagError {
@@ -77,6 +80,10 @@ impl core::fmt::Display for DagError {
             } => write!(
                 f,
                 "block {id} timestamp {timestamp_ms}ms precedes parent timestamp {parent_timestamp_ms}ms"
+            ),
+            DagError::InsufficientProofOfWork { id, work } => write!(
+                f,
+                "block {id} does not meet its proof-of-work target for work {work}"
             ),
         }
     }
@@ -155,6 +162,10 @@ pub struct Dag {
     /// implies and its timestamp not to precede any parent's. See
     /// [`Dag::set_difficulty`] and [`crate::difficulty`].
     difficulty: Option<Retarget>,
+    /// Consensus-enforced proof-of-work switch. When `true`, each [`Dag::insert`]
+    /// requires every non-genesis block's id to meet its `work` target (see
+    /// [`crate::pow`] and [`Dag::set_proof_of_work`]). Off by default.
+    require_pow: bool,
 }
 
 impl Dag {
@@ -188,6 +199,7 @@ impl Dag {
             reach: Reachability::empty(),
             validator: None,
             difficulty: None,
+            require_pow: false,
         };
         dag.reach = Reachability::build(&dag);
         dag
@@ -237,6 +249,29 @@ impl Dag {
     /// The enforced difficulty policy, if any (see [`Dag::set_difficulty`]).
     pub fn difficulty(&self) -> Option<Retarget> {
         self.difficulty
+    }
+
+    /// Enable (or disable) consensus-enforced proof-of-work.
+    ///
+    /// Once enabled, every subsequent [`Dag::insert`] of a non-genesis block
+    /// requires the block's id to meet its `work` target — i.e. it must have been
+    /// **mined** so that `H * work < 2^256`, where `H` is the id as a big-endian
+    /// 256-bit integer (Nakamoto-style hash-target PoW; see [`crate::pow`]).
+    /// Genesis is exempt (it is a fixed anchor, not mined).
+    ///
+    /// Verification is a pure function of the block, so every node agrees. PoW is
+    /// **off by default**, so a DAG built without this call accepts any nonce,
+    /// exactly as before. It composes with [`Dag::set_difficulty`]: with both on,
+    /// difficulty pins `work` to [`Dag::next_work_target`] *and* the block must be
+    /// mined to meet that work's target.
+    pub fn set_proof_of_work(&mut self, enabled: bool) {
+        self.require_pow = enabled;
+    }
+
+    /// Whether consensus-enforced proof-of-work is on (see
+    /// [`Dag::set_proof_of_work`]).
+    pub fn proof_of_work_enabled(&self) -> bool {
+        self.require_pow
     }
 
     /// The `work` a new block built on `parents` must carry to satisfy the
@@ -474,6 +509,17 @@ impl Dag {
         // is wired in, so a rejected block leaves the DAG unchanged.
         if let Some(retarget) = self.difficulty {
             self.check_difficulty(&block, id, sp, &retarget)?;
+        }
+
+        // Consensus-enforced proof-of-work, if enabled: the block's id must meet
+        // its `work` target (Nakamoto-style hash-target PoW; see `crate::pow`).
+        // Genesis is exempt, but this path only runs for non-genesis inserts.
+        // Independent of and composable with the difficulty check above.
+        if self.require_pow && !crate::pow::meets_target(&id, block.work()) {
+            return Err(DagError::InsufficientProofOfWork {
+                id,
+                work: block.work(),
+            });
         }
         let past_size = self.nodes[&sp].past_size
             + 1

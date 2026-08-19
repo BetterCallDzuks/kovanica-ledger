@@ -20,12 +20,19 @@ protocol behind Kaspa).
   that identifies the well-connected cluster and bounds an attacker's influence.
 - **Linearization**: a deterministic total order over the whole DAG, plus the
   selected (heaviest) chain.
+- **Proof-of-work** (`pow` + `Dag::set_proof_of_work`): real Nakamoto-style
+  hash-target mining — a block's id read as a 256-bit integer `H` must satisfy
+  `H * work < 2^256`, so `work` is the expected number of hashes and heavier
+  blocks cost real hash power. Blocks carry a `nonce`; `pow::mine` searches it;
+  with PoW enabled, `Dag::insert` rejects any block that isn't adequately mined.
+  Opt-in (off by default), dependency-free 256-bit arithmetic.
 - **Difficulty** (`difficulty::Retarget` + `Dag::set_difficulty`): computes the
   `work` the next block should target from the timestamps + work of recent blocks
   to hold a steady block rate, and **enforces it in consensus** — with difficulty
   enabled, `Dag::insert` requires each block's `work` to equal
   `Dag::next_work_target` and its `timestamp` not to precede any parent's.
-  Enforcement is opt-in; blocks now carry a `timestamp`.
+  Enforcement is opt-in; blocks carry a `timestamp` and a `nonce`. With PoW on
+  too, difficulty pins the work and PoW forces the block to be mined to it.
 - **Reachability oracle** (`reachability::Reachability`): an interval-tree +
   future-covering-set index for O(1) ancestor queries — now the DAG's backing for
   ancestor and mergeset computation, so the O(n²) per-block `past` sets are gone
@@ -109,13 +116,13 @@ cargo clippy --all-targets
 ```rust
 use kovanica_dag::{Block, Dag};
 
-let genesis = Block::genesis(1, b"kovanica-genesis".to_vec());
+let genesis = Block::genesis(1, 0, 0, b"kovanica-genesis".to_vec());
 let genesis_id = genesis.id();
 let mut dag = Dag::new(3, genesis); // k = 3
 
-let a = dag.insert(Block::new(vec![genesis_id], 1, b"a".to_vec())).unwrap();
-let b = dag.insert(Block::new(vec![genesis_id], 1, b"b".to_vec())).unwrap();
-let c = dag.insert(Block::new(vec![a, b], 1, b"c".to_vec())).unwrap();
+let a = dag.insert(Block::new(vec![genesis_id], 1, 1, 0, b"a".to_vec())).unwrap();
+let b = dag.insert(Block::new(vec![genesis_id], 1, 1, 0, b"b".to_vec())).unwrap();
+let c = dag.insert(Block::new(vec![a, b], 1, 2, 0, b"c".to_vec())).unwrap();
 
 assert_eq!(dag.ghostdag(&c).unwrap().blue_score, 3); // genesis + a + b
 let order = dag.linearize();                          // deterministic total order
@@ -135,13 +142,13 @@ let alice = KeyPair::from_u64(2);
 // Genesis coinbase mints 100 to the miner.
 let coinbase = Transaction::coinbase(vec![TxOutput::new(100, miner.address())], b"genesis".to_vec());
 let coin = OutPoint::new(coinbase.id(), 0);
-let genesis = Block::genesis(1, encode_block_payload(&[coinbase]));
+let genesis = Block::genesis(1, 0, 0, encode_block_payload(&[coinbase]));
 let genesis_id = genesis.id();
 let mut dag = Dag::new(3, genesis);
 
 // The miner sends 100 to Alice, spending the coinbase output.
 let pay = Transaction::signed(&[(coin, &miner)], vec![TxOutput::new(100, alice.address())], vec![]);
-dag.insert(Block::new(vec![genesis_id], 1, encode_block_payload(&[pay]))).unwrap();
+dag.insert(Block::new(vec![genesis_id], 1, 1, 0, encode_block_payload(&[pay]))).unwrap();
 
 let run = apply_dag(&dag, 100); // subsidy = 100 per block
 assert_eq!(run.utxo.balance(&alice.address()), 100);

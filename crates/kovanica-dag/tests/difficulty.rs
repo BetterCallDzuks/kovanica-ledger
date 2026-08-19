@@ -25,7 +25,7 @@ fn small_retarget() -> Retarget {
 /// A difficulty-enforcing DAG seeded with a genesis at `work = 1`, `ts = 0`.
 /// Genesis itself is exempt from the difficulty rules (it has no past).
 fn enforcing_dag() -> (Dag, BlockId) {
-    let genesis = Block::genesis(1, 0, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
     let g = genesis.id();
     let mut dag = Dag::new(3, genesis);
     dag.set_difficulty(small_retarget());
@@ -36,7 +36,7 @@ fn enforcing_dag() -> (Dag, BlockId) {
 fn genesis_work_and_timestamp_are_unconstrained() {
     // Genesis carries arbitrary work/timestamp and is never difficulty-checked;
     // enabling difficulty on the DAG does not reject it.
-    let genesis = Block::genesis(999, 12_345, b"genesis".to_vec());
+    let genesis = Block::genesis(999, 12_345, 0, b"genesis".to_vec());
     let g = genesis.id();
     let mut dag = Dag::new(3, genesis);
     dag.set_difficulty(small_retarget());
@@ -50,7 +50,7 @@ fn first_block_must_carry_min_work() {
 
     // With only genesis in history there is no interval to measure, so the
     // target is the floor `min_work` (= 1). Any other work is rejected.
-    let wrong = Block::new(vec![g], 5, 500, b"b1".to_vec());
+    let wrong = Block::new(vec![g], 5, 500, 0, b"b1".to_vec());
     let id = wrong.id();
     assert_eq!(
         dag.insert(wrong),
@@ -64,7 +64,7 @@ fn first_block_must_carry_min_work() {
 
     // The honest target (1) is accepted.
     assert!(dag
-        .insert(Block::new(vec![g], 1, 500, b"b1".to_vec()))
+        .insert(Block::new(vec![g], 1, 500, 0, b"b1".to_vec()))
         .is_ok());
 }
 
@@ -74,13 +74,13 @@ fn fast_cadence_raises_the_required_work_and_off_target_is_rejected() {
     // b1 arrives 500ms after genesis (twice as fast as the 1s target), at the
     // required work 1.
     let b1 = dag
-        .insert(Block::new(vec![g], 1, 500, b"b1".to_vec()))
+        .insert(Block::new(vec![g], 1, 500, 0, b"b1".to_vec()))
         .unwrap();
 
     // For b2 the sampled window is [genesis@0/w1, b1@500/w1]: one 500ms interval
     // against a 1000ms target → work must roughly double, clamped: expected = 2.
     // A miner understating the work (1) is rejected …
-    let understated = Block::new(vec![b1], 1, 1_000, b"b2".to_vec());
+    let understated = Block::new(vec![b1], 1, 1_000, 0, b"b2".to_vec());
     let id = understated.id();
     assert_eq!(
         dag.insert(understated),
@@ -92,7 +92,7 @@ fn fast_cadence_raises_the_required_work_and_off_target_is_rejected() {
     );
 
     // … and so is one overstating it (100).
-    let overstated = Block::new(vec![b1], 100, 1_000, b"b2".to_vec());
+    let overstated = Block::new(vec![b1], 100, 1_000, 0, b"b2".to_vec());
     let id = overstated.id();
     assert_eq!(
         dag.insert(overstated),
@@ -105,7 +105,7 @@ fn fast_cadence_raises_the_required_work_and_off_target_is_rejected() {
 
     // Only the exact target (2) is admitted.
     assert!(dag
-        .insert(Block::new(vec![b1], 2, 1_000, b"b2".to_vec()))
+        .insert(Block::new(vec![b1], 2, 1_000, 0, b"b2".to_vec()))
         .is_ok());
 }
 
@@ -122,6 +122,7 @@ fn on_target_cadence_holds_work_steady() {
                 vec![parent],
                 1,
                 ts,
+                0,
                 format!("b{i}").into_bytes(),
             ))
             .unwrap_or_else(|e| panic!("block {i} at steady cadence should be accepted: {e:?}"));
@@ -133,12 +134,12 @@ fn on_target_cadence_holds_work_steady() {
 fn a_block_may_not_precede_its_parent_in_time() {
     let (mut dag, g) = enforcing_dag();
     let b1 = dag
-        .insert(Block::new(vec![g], 1, 500, b"b1".to_vec()))
+        .insert(Block::new(vec![g], 1, 500, 0, b"b1".to_vec()))
         .unwrap();
 
     // b2 carries the correct work (2) but a timestamp earlier than b1's (500).
     // The timestamp rule rejects it regardless of the work being right.
-    let backdated = Block::new(vec![b1], 2, 400, b"b2".to_vec());
+    let backdated = Block::new(vec![b1], 2, 400, 0, b"b2".to_vec());
     let id = backdated.id();
     assert_eq!(
         dag.insert(backdated),
@@ -156,15 +157,15 @@ fn timestamp_must_not_precede_any_parent_of_a_merge() {
     // Two parallel blocks off genesis with different timestamps (both need the
     // first-block target, min_work = 1).
     let a = dag
-        .insert(Block::new(vec![g], 1, 500, b"a".to_vec()))
+        .insert(Block::new(vec![g], 1, 500, 0, b"a".to_vec()))
         .unwrap();
     let b = dag
-        .insert(Block::new(vec![g], 1, 1_000, b"b".to_vec()))
+        .insert(Block::new(vec![g], 1, 1_000, 0, b"b".to_vec()))
         .unwrap();
 
     // A merge timestamped 700ms is >= a (500) but precedes b (1000): rejected,
     // and the reported parent is the one it is older than.
-    let merge = Block::new(vec![a, b], 1, 700, b"m".to_vec());
+    let merge = Block::new(vec![a, b], 1, 700, 0, b"m".to_vec());
     let id = merge.id();
     assert_eq!(
         dag.insert(merge),
@@ -184,14 +185,14 @@ fn the_target_is_a_deterministic_function_of_the_dag() {
     fn build_to_b1() -> (Dag, BlockId) {
         let (mut dag, g) = enforcing_dag();
         let b1 = dag
-            .insert(Block::new(vec![g], 1, 500, b"b1".to_vec()))
+            .insert(Block::new(vec![g], 1, 500, 0, b"b1".to_vec()))
             .unwrap();
         (dag, b1)
     }
 
     let expected_from = |dag: &mut Dag, b1: BlockId| -> u128 {
         // Insert a deliberately-wrong-work block and read the target back.
-        match dag.insert(Block::new(vec![b1], 999, 1_000, b"probe".to_vec())) {
+        match dag.insert(Block::new(vec![b1], 999, 1_000, 0, b"probe".to_vec())) {
             Err(DagError::DifficultyMismatch { expected, .. }) => expected,
             other => panic!("expected a DifficultyMismatch, got {other:?}"),
         }
@@ -208,11 +209,11 @@ fn difficulty_off_by_default_accepts_any_work() {
     // Without set_difficulty, work and timestamps are unchecked, exactly as
     // before this feature — a block with arbitrary work and a backdated
     // timestamp is still admitted.
-    let genesis = Block::genesis(1, 100, b"genesis".to_vec());
+    let genesis = Block::genesis(1, 100, 0, b"genesis".to_vec());
     let g = genesis.id();
     let mut dag = Dag::new(3, genesis);
     assert!(dag.difficulty().is_none());
     assert!(dag
-        .insert(Block::new(vec![g], 987_654, 0, b"anything".to_vec()))
+        .insert(Block::new(vec![g], 987_654, 0, 0, b"anything".to_vec()))
         .is_ok());
 }

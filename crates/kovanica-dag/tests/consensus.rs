@@ -9,7 +9,7 @@ use kovanica_dag::{Block, BlockId, Dag, DagError};
 
 /// Build a DAG with the given `k` and a fixed genesis.
 fn new_dag(k: u16) -> (Dag, BlockId) {
-    let genesis = Block::genesis(1, 0, b"kovanica-genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"kovanica-genesis".to_vec());
     let id = genesis.id();
     (Dag::new(k, genesis), id)
 }
@@ -24,6 +24,7 @@ fn add_w(dag: &mut Dag, parents: &[BlockId], work: u128, label: &str) -> BlockId
     dag.insert(Block::new(
         parents.to_vec(),
         work,
+        0,
         0,
         label.as_bytes().to_vec(),
     ))
@@ -219,16 +220,18 @@ fn heavier_branch_wins_selected_chain() {
 fn insert_validations() {
     let (mut dag, genesis) = new_dag(3);
     // Duplicate.
-    let a_block = Block::new(vec![genesis], 1, 0, b"a".to_vec());
+    let a_block = Block::new(vec![genesis], 1, 0, 0, b"a".to_vec());
     let a = dag.insert(a_block.clone()).unwrap();
     assert!(dag.insert(a_block).is_err());
     // Missing parent.
-    let phantom = Block::genesis(1, 0, b"not-in-dag".to_vec()).id();
+    let phantom = Block::genesis(1, 0, 0, b"not-in-dag".to_vec()).id();
     assert!(dag
-        .insert(Block::new(vec![phantom], 1, 0, b"x".to_vec()))
+        .insert(Block::new(vec![phantom], 1, 0, 0, b"x".to_vec()))
         .is_err());
     // Non-genesis with no parents.
-    assert!(dag.insert(Block::new(vec![], 1, 0, b"y".to_vec())).is_err());
+    assert!(dag
+        .insert(Block::new(vec![], 1, 0, 0, b"y".to_vec()))
+        .is_err());
     // Sanity: the one good block is a tip.
     assert_eq!(dag.tips(), vec![a]);
 }
@@ -407,7 +410,7 @@ fn preview_matches_the_block_after_insert() {
     let b = add(&mut dag, &[genesis], "b");
 
     // A merge of a and b, previewed before it is inserted.
-    let m_block = Block::new(vec![a, b], 1, 0, b"m".to_vec());
+    let m_block = Block::new(vec![a, b], 1, 0, 0, b"m".to_vec());
     let preview = dag.preview(&m_block).unwrap();
 
     let m = dag.insert(m_block).unwrap();
@@ -427,12 +430,12 @@ fn preview_matches_the_block_after_insert() {
 
     // preview mirrors insert's structural checks.
     assert!(matches!(
-        dag.preview(&Block::new(vec![], 1, 0, b"x".to_vec())),
+        dag.preview(&Block::new(vec![], 1, 0, 0, b"x".to_vec())),
         Err(DagError::NoParents(_))
     ));
-    let phantom = Block::genesis(1, 0, b"phantom".to_vec()).id();
+    let phantom = Block::genesis(1, 0, 0, b"phantom".to_vec()).id();
     assert!(matches!(
-        dag.preview(&Block::new(vec![phantom], 1, 0, b"y".to_vec())),
+        dag.preview(&Block::new(vec![phantom], 1, 0, 0, b"y".to_vec())),
         Err(DagError::MissingParent(_))
     ));
 }
@@ -442,7 +445,7 @@ fn installed_validator_rejects_blocks_at_insert() {
     // A validator that rejects any block whose payload does not start with b'k'.
     // It must run only after the structural DAG checks (parents present), and a
     // rejected block must not be added to the DAG.
-    let genesis = Block::genesis(1, 0, b"kovanica-genesis".to_vec());
+    let genesis = Block::genesis(1, 0, 0, b"kovanica-genesis".to_vec());
     let genesis_id = genesis.id();
     let mut dag = Dag::with_validator(
         3,
@@ -458,13 +461,13 @@ fn installed_validator_rejects_blocks_at_insert() {
 
     // Accepted: payload starts with 'k'.
     let good = dag
-        .insert(Block::new(vec![genesis_id], 1, 0, b"keep".to_vec()))
+        .insert(Block::new(vec![genesis_id], 1, 0, 0, b"keep".to_vec()))
         .expect("valid block accepted");
 
     // Rejected by the validator: surfaced as DagError, and not added.
     let before = dag.len();
     let err = dag
-        .insert(Block::new(vec![good], 1, 0, b"drop".to_vec()))
+        .insert(Block::new(vec![good], 1, 0, 0, b"drop".to_vec()))
         .unwrap_err();
     assert!(
         matches!(err, DagError::InvalidBlock { .. }),
@@ -475,9 +478,9 @@ fn installed_validator_rejects_blocks_at_insert() {
 
     // Structural DAG checks run before the validator: a missing-parent block
     // fails as MissingParent, not InvalidBlock, even though its payload is bad.
-    let phantom_id = Block::genesis(1, 0, b"phantom".to_vec()).id();
+    let phantom_id = Block::genesis(1, 0, 0, b"phantom".to_vec()).id();
     let err = dag
-        .insert(Block::new(vec![phantom_id], 1, 0, b"drop".to_vec()))
+        .insert(Block::new(vec![phantom_id], 1, 0, 0, b"drop".to_vec()))
         .unwrap_err();
     assert!(matches!(err, DagError::MissingParent(_)));
 }
