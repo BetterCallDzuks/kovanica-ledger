@@ -72,8 +72,12 @@ nodes exchange blocks to converge on one DAG — in-process (`net::gossip`) or o
 TCP (`net::serve_blocks` / `pull_blocks`). Produced blocks are stamped with the
 node's wall clock (clamped monotone above their parents), and `receive_block`
 rejects a peer's block dated more than two hours ahead of local time — node
-policy, not pure-DAG consensus. Snapshot-backed via `save`/`load`. Continuous p2p
-(peer discovery, relay) is not built yet.
+policy, not pure-DAG consensus. A node may also declare a geographic **origin**
+(ISO 3166-1 alpha-3) so operators can track where users come from; in-process
+gossip records a pulse from the sender. Origin never enters a block and does not
+affect GHOSTDAG — the same kind of node policy as the future-time bound. The
+TCP one-shot wire stays block records only. Snapshot-backed via `save`/`load`.
+Continuous p2p (peer discovery, relay) is not built yet.
 
 ## Run the node
 
@@ -84,23 +88,27 @@ cargo run -p kovanica-node           # REPL: type commands, `help`, `quit`
 
 ```text
 > genesis 3 1000 500 1     # mint 500 to actor 1 (k=3, subsidy=1000)
+> origin HRV               # declare this node's country (node policy)
 > send 1 200 2             # immediate block: actor 1 sends 200 to actor 2
 > pool 2 50 3              # queue a transfer in the mempool
 > produce                  # pack the mempool into a block
 > balance 3                # ok 50
+> origins                  # observed peer pulses (empty until gossip)
 > save ledger.snap         # persist; `load ledger.snap` restores it
 ```
 
 Two `Node`s that share a genesis converge by exchanging blocks:
 
 ```rust
-use kovanica_node::{net, Node};
+use kovanica_node::{net, Origin, Node};
 
 let mut a = Node::new(); a.genesis(3, 1000, 1000, 1).unwrap();
+a.set_origin(Origin::parse("HRV").unwrap());
 let mut b = Node::new(); b.genesis(3, 1000, 1000, 1).unwrap();
 a.send(1, 400, 2).unwrap();      // a produces a block
-net::gossip(&a, &mut b).unwrap(); // b catches up
+net::gossip(&a, &mut b).unwrap(); // b catches up, and records a HRV pulse
 assert_eq!(b.balance(&Node::address(2)).unwrap(), 400);
+assert_eq!(b.origin_pulses(), vec![(Origin::parse("HRV").unwrap(), 1)]);
 ```
 
 ## Build & test

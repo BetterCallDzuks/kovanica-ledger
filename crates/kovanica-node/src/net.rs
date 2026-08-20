@@ -24,8 +24,12 @@ use crate::node::{BlockRecord, Node};
 
 /// Copy every block `from` has into `to`, in topological order (in-process).
 /// Returns the number of records applied. Idempotent — already-present blocks
-/// are skipped.
+/// are skipped. If `from` has declared an [`crate::Origin`], `to` records one
+/// origin pulse (node policy — not consensus).
 pub fn gossip(from: &Node, to: &mut Node) -> Result<usize, NetError> {
+    if let Some(origin) = from.origin() {
+        to.observe_origin(origin);
+    }
     let mut applied = 0;
     for record in from.export() {
         to.receive_block(record)

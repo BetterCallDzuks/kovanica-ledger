@@ -17,17 +17,20 @@
 //! tip                                 selected (heaviest) tip
 //! len                                 number of blocks
 //! save <path> / load <path>          snapshot persistence
+//! origin [ISO3]                      get/set this node's geographic origin
+//! origins                            observed peer-origin pulse counts
 //! ```
 
 use kovanica_state::Address;
 
 use crate::node::Node;
+use crate::origin::Origin;
 
 /// The help text listing every command.
 pub const HELP: &str = "commands: help | genesis <k> <subsidy> <amount> <seed> | \
 address <seed> | balance <seed|addr-hex> | send <from-seed> <amount> <to-seed> | \
 pool <from-seed> <amount> <to-seed> | produce | pending | tips | tip | len | \
-save <path> | load <path>";
+origin [ISO3] | origins | save <path> | load <path>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -115,6 +118,33 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
 
         "len" => Ok(node.block_count().map_err(|e| e.to_string())?.to_string()),
 
+        "origin" => match args.len() {
+            0 => Ok(node
+                .origin()
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "none".to_string())),
+            1 => {
+                let origin = Origin::parse(args[0]).map_err(|e| e.to_string())?;
+                node.set_origin(origin);
+                Ok(origin.to_string())
+            }
+            n => Err(format!("expected 0 or 1 argument(s), got {n}")),
+        },
+
+        "origins" => {
+            let [] = fixed::<0>(&args)?;
+            let pulses = node.origin_pulses();
+            if pulses.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(pulses
+                    .iter()
+                    .map(|(o, n)| format!("{o} {n}"))
+                    .collect::<Vec<_>>()
+                    .join(" "))
+            }
+        }
+
         "save" => {
             let [path] = fixed::<1>(&args)?;
             node.save(path).map_err(|e| e.to_string())?;
@@ -180,5 +210,13 @@ mod tests {
         assert!(execute_line(&mut node, "genesis 3 1000").starts_with("err expected 4"));
         assert!(execute_line(&mut node, "genesis x 1 1 1").starts_with("err"));
         assert!(execute_line(&mut node, "balance 1").starts_with("err")); // no ledger yet
+    }
+
+    #[test]
+    fn origin_round_trip_and_empty_pulses() {
+        let mut node = Node::new();
+        assert_eq!(execute_line(&mut node, "origin"), "ok none");
+        assert_eq!(execute_line(&mut node, "origin HRV"), "ok HRV");
+        assert_eq!(execute_line(&mut node, "origins"), "ok");
     }
 }
