@@ -24,6 +24,7 @@ fn a_pooled_transfer_is_packed_into_a_block() {
     assert!(run(&mut node, "produce").starts_with("ok block "));
     assert_eq!(run(&mut node, "pending"), "ok 0");
     assert_eq!(bal(&mut node, 2), 400);
+    assert_eq!(bal(&mut node, 1), 1600); // 600 change + 1000 KVNC subsidy
     assert_eq!(run(&mut node, "len"), "ok 2"); // genesis + produced block
 }
 
@@ -40,8 +41,8 @@ fn non_conflicting_entries_from_two_actors_pack_together() {
 
     assert!(run(&mut node, "produce").starts_with("ok block "));
     assert_eq!(run(&mut node, "pending"), "ok 0");
-    assert_eq!(bal(&mut node, 1), 400); // 500 change - 100
-    assert_eq!(bal(&mut node, 2), 400); // 500 - 100
+    assert_eq!(bal(&mut node, 1), 1400); // 400 change + 1000 subsidy coinbase
+    assert_eq!(bal(&mut node, 2), 399); // 500 - 100 - 1 fee
     assert_eq!(bal(&mut node, 3), 100);
     assert_eq!(bal(&mut node, 4), 100);
 }

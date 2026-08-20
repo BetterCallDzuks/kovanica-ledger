@@ -10,7 +10,7 @@ protocol behind Kaspa).
 > append-only log), and a runnable node binary with a mempool, multi-node gossip,
 > an in-process overlay (`p2p::Mesh`) and a long-lived TCP relay
 > (`relay::RelaySession`) are implemented and tested. See
-> [`CLAUDE.md`](./CLAUDE.md) for architecture, conventions, and roadmap.
+> [`TESTNET.md`](./TESTNET.md) for the public `kovanica-testnet-1` bootstrap (explorer, wallet, P2P, fees).
 
 ## What's here
 
@@ -67,7 +67,9 @@ protocol behind Kaspa).
   with no explicit revert.
 
 `crates/kovanica-node` — a runnable node tying the stack together behind a small
-line RPC (`serve` reads commands from stdin; `demo` replays a scripted scenario).
+line RPC (`serve` reads commands from stdin; `demo` replays a scripted scenario)
+and a **self-hosted explorer** (`kovanica-node explorer [addr]`) that serves a
+JSON API + UI from the same process. The page does not reimplement consensus.
 A **mempool** queues transfers (`pool`) that `produce` packs into a block, and
 nodes exchange blocks to converge on one DAG — in-process (`net::gossip`) or over
 TCP (`net::serve_blocks` / `pull_blocks`). Produced blocks are stamped with the

@@ -16,6 +16,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 use kovanica_dag::BlockId;
 use kovanica_state::{decode_block_payload, encode_block_payload};
@@ -69,6 +70,31 @@ pub fn pull_blocks<A: ToSocketAddrs>(addr: A, node: &mut Node) -> Result<usize, 
     Ok(applied)
 }
 
+/// Like [`pull_blocks`] but bounded so a dead peer cannot stall the explorer.
+pub fn pull_blocks_timeout(
+    addr: &str,
+    node: &mut Node,
+    timeout: Duration,
+) -> Result<usize, NetError> {
+    let sock = addr
+        .to_socket_addrs()
+        .map_err(io)?
+        .next()
+        .ok_or_else(|| NetError::Io("no address".into()))?;
+    let mut stream = TcpStream::connect_timeout(&sock, timeout).map_err(io)?;
+    stream.set_read_timeout(Some(timeout)).map_err(io)?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(io)?;
+    let records = decode_records(&buf)?;
+    let mut applied = 0;
+    for record in records {
+        node.receive_block(record)
+            .map_err(|e| NetError::Apply(e.to_string()))?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
 /// Why a sync failed.
 #[derive(Debug)]
 pub enum NetError {
@@ -99,7 +125,7 @@ fn io(e: std::io::Error) -> NetError {
 /// Wire encoding of block records: count, then per record — parents
 /// (count + 32-byte ids), work (u128), timestamp (u64), nonce (u64), and the
 /// block payload (length-prefixed, the same encoding a block carries).
-fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
+pub(crate) fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(records.len() as u64).to_le_bytes());
     for record in records {

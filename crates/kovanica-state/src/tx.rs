@@ -181,6 +181,31 @@ impl Transaction {
         tx
     }
 
+    /// An unsigned spend: signatures are zeroed. The wallet signs
+    /// [`sighash`](Self::sighash) and attaches the result with
+    /// [`attach_signature`](Self::attach_signature).
+    pub fn unsigned(outpoints: &[OutPoint], outputs: Vec<TxOutput>, tag: Vec<u8>) -> Self {
+        Self {
+            inputs: outpoints
+                .iter()
+                .map(|outpoint| TxInput {
+                    outpoint: *outpoint,
+                    signature: Sig::zero(),
+                })
+                .collect(),
+            outputs,
+            tag,
+        }
+    }
+
+    /// Attach a signature to input `index`. Used by a wallet that signed
+    /// [`sighash`](Self::sighash) off-node.
+    pub fn attach_signature(&mut self, index: usize, signature: Sig) {
+        if let Some(input) = self.inputs.get_mut(index) {
+            input.signature = signature;
+        }
+    }
+
     /// The transaction's inputs (empty for a coinbase).
     pub fn inputs(&self) -> &[TxInput] {
         &self.inputs

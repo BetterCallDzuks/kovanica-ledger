@@ -17,11 +17,11 @@ fn end_to_end_transfers_update_balances() {
     assert_eq!(run(&mut node, "balance 1"), "ok 500");
 
     assert!(run(&mut node, "send 1 200 2").starts_with("ok block "));
-    assert_eq!(run(&mut node, "balance 1"), "ok 300"); // 500 - 200 change
+    assert_eq!(run(&mut node, "balance 1"), "ok 299"); // 500 - 200 - 1 fee
     assert_eq!(run(&mut node, "balance 2"), "ok 200");
 
     assert!(run(&mut node, "send 2 50 3").starts_with("ok block "));
-    assert_eq!(run(&mut node, "balance 2"), "ok 150");
+    assert_eq!(run(&mut node, "balance 2"), "ok 149");
     assert_eq!(run(&mut node, "balance 3"), "ok 50");
 
     assert_eq!(run(&mut node, "len"), "ok 3"); // genesis + 2 transfer blocks
@@ -79,14 +79,14 @@ fn snapshot_roundtrip_through_rpc_preserves_balances() {
     // Fresh node loads the snapshot and sees the same balances and height.
     let mut restored = Node::new();
     assert_eq!(run(&mut restored, &format!("load {path_str}")), "ok loaded");
-    assert_eq!(run(&mut restored, "balance 1"), "ok 300");
-    assert_eq!(run(&mut restored, "balance 2"), "ok 150");
+    assert_eq!(run(&mut restored, "balance 1"), "ok 299");
+    assert_eq!(run(&mut restored, "balance 2"), "ok 149");
     assert_eq!(run(&mut restored, "balance 3"), "ok 50");
     assert_eq!(run(&mut restored, "len"), "ok 3");
 
     // A restored node keeps working: actor 3 forwards to actor 4.
-    assert!(run(&mut restored, "send 3 50 4").starts_with("ok block "));
-    assert_eq!(run(&mut restored, "balance 4"), "ok 50");
+    assert!(run(&mut restored, "send 3 40 4").starts_with("ok block "));
+    assert_eq!(run(&mut restored, "balance 4"), "ok 40");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -97,9 +97,9 @@ fn parallel_sends_from_two_actors_both_land() {
     // grows and both transfers take effect.
     let mut node = Node::new();
     run(&mut node, "genesis 3 1000 1000 1");
-    run(&mut node, "send 1 400 2"); // 1 -> 2 (400), change 600 to 1
-    run(&mut node, "send 1 300 3"); // 1 -> 3 (300), change 300 to 1
-    assert_eq!(run(&mut node, "balance 1"), "ok 300");
+    run(&mut node, "send 1 400 2"); // 1 -> 2 (400), change 599 to 1 (1 fee)
+    run(&mut node, "send 1 300 3"); // 1 -> 3 (300), change 298 to 1
+    assert_eq!(run(&mut node, "balance 1"), "ok 298");
     assert_eq!(run(&mut node, "balance 2"), "ok 400");
     assert_eq!(run(&mut node, "balance 3"), "ok 300");
 }

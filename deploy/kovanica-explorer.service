@@ -1,0 +1,13 @@
+[Unit]
+Description=Kovanica BlockDAG explorer
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/kovanica-ledger
+ExecStart=/root/kovanica-ledger/target/release/kovanica-node explorer 127.0.0.1:8080
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -14,8 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::{pow, Block, BlockId, Dag, DagError};
 use kovanica_state::{
-    apply_block, decode_block_payload, encode_block_payload, Address, KeyPair, Ledger, LedgerError,
-    LedgerInsertError, LedgerStore, OutPoint, Transaction, TxId, TxOutput,
+    apply_block, decode_block_payload, encode_block_payload, verify, Address, KeyPair, Ledger,
+    LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig, Transaction, TxId, TxOutput,
+    UtxoSet,
 };
 
 use crate::mempool::Mempool;
@@ -53,6 +54,8 @@ pub enum NodeError {
     InsufficientFunds,
     /// A coinbase transaction was submitted where a spend was expected.
     UnexpectedCoinbase,
+    /// The supplied spend signature did not verify.
+    BadSignature,
     /// Building the genesis ledger failed.
     Ledger(LedgerError),
     /// Submitting the block failed (structure or stateful validation).
@@ -77,8 +80,11 @@ impl core::fmt::Display for NodeError {
             NodeError::NotInitialized => f.write_str("no ledger yet — run `genesis` first"),
             NodeError::AlreadyInitialized => f.write_str("already initialised"),
             NodeError::ZeroAmount => f.write_str("amount must be non-zero"),
-            NodeError::InsufficientFunds => f.write_str("no single output covers the amount"),
+            NodeError::InsufficientFunds => {
+                f.write_str("no single output covers the amount plus fee")
+            }
             NodeError::UnexpectedCoinbase => f.write_str("coinbase transactions are not accepted"),
+            NodeError::BadSignature => f.write_str("bad spend signature"),
             NodeError::Ledger(e) => write!(f, "genesis invalid: {e}"),
             NodeError::Insert(e) => write!(f, "{e}"),
             NodeError::Io(e) => write!(f, "io error: {e}"),
@@ -103,6 +109,21 @@ pub struct Sent {
     pub tx: TxId,
 }
 
+/// An unsigned transfer ready for a wallet to sign.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    /// The unsigned transaction (zeroed signatures).
+    pub tx: Transaction,
+    /// BLAKE3 sighash the wallet must sign.
+    pub sighash: [u8; 32],
+    /// Selected funding outpoint.
+    pub outpoint: OutPoint,
+    /// Value of that outpoint.
+    pub value: u64,
+    /// Protocol fee burned-or-paid to the miner (atoms).
+    pub fee: u64,
+}
+
 /// The wire form of a block for gossip: everything a peer needs to re-insert it.
 #[derive(Clone, Debug)]
 pub struct BlockRecord {
@@ -125,7 +146,14 @@ pub struct Node {
     ledger: Option<Ledger>,
     mempool: Mempool,
     clock: Clock,
+    /// Address that receives the per-block KVNC subsidy coinbase.
+    miner: Option<Address>,
 }
+
+/// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
+pub const HALVING_ERA: u64 = 1_000;
+/// Floor: `max(1, subsidy / 500_000)`. On the 50 KVNC testnet that is 0.0001 KVNC.
+pub const MIN_FEE_DIVISOR: u64 = 500_000;
 
 impl Node {
     /// A fresh node with no ledger yet.
@@ -210,6 +238,13 @@ impl Node {
         Ok(())
     }
 
+    /// Whether consensus-enforced proof-of-work is on.
+    pub fn proof_of_work(&self) -> bool {
+        self.ledger()
+            .map(|l| l.dag().proof_of_work_enabled())
+            .unwrap_or(false)
+    }
+
     /// Whether a genesis has been created.
     pub fn is_initialized(&self) -> bool {
         self.ledger.is_some()
@@ -239,11 +274,50 @@ impl Node {
         let ledger = Ledger::new(k, subsidy, &[coinbase]).map_err(NodeError::Ledger)?;
         let genesis = ledger.genesis();
         self.ledger = Some(ledger);
+        self.miner = Some(founder);
         Ok((genesis, founder))
     }
 
-    fn ledger(&self) -> Result<&Ledger, NodeError> {
+    /// Who receives the native-token (KVNC) subsidy on produced blocks.
+    pub fn set_miner(&mut self, miner: Address) {
+        self.miner = Some(miner);
+    }
+
+    /// Current miner address, if set.
+    pub fn miner(&self) -> Option<Address> {
+        self.miner
+    }
+
+    /// Protocol minimum fee for the next transfer, in atoms.
+    pub fn min_fee(&self) -> u64 {
+        let cap = self.ledger().map(|l| l.subsidy()).unwrap_or(1);
+        (cap / MIN_FEE_DIVISOR).max(1)
+    }
+
+    /// KVNC atoms minted on the *next* produced block (decaying from the
+    /// genesis subsidy cap). Coinbase still cannot exceed `ledger.subsidy()`.
+    pub fn issuance(&self) -> Result<u64, NodeError> {
+        let ledger = self.ledger()?;
+        Ok(Self::issuance_at(ledger.subsidy(), ledger.dag().len() as u64))
+    }
+
+    /// `cap >> (height / HALVING_ERA)`, saturating at zero.
+    pub fn issuance_at(cap: u64, height: u64) -> u64 {
+        let era = height / HALVING_ERA;
+        if era >= 63 {
+            0
+        } else {
+            cap >> era
+        }
+    }
+
+    pub(crate) fn ledger(&self) -> Result<&Ledger, NodeError> {
         self.ledger.as_ref().ok_or(NodeError::NotInitialized)
+    }
+
+    /// Pending mempool transactions in assembly order.
+    pub fn pending_txs(&self) -> Vec<Transaction> {
+        self.mempool.ordered()
     }
 
     /// The spendable balance of `owner` in the current full ledger state.
@@ -280,44 +354,104 @@ impl Node {
         amount: u64,
         to_seed: u64,
     ) -> Result<Transaction, NodeError> {
+        self.build_transfer_to(from_seed, amount, Self::address(to_seed))
+    }
+
+    /// Build a signed transfer from a seed actor to an arbitrary address.
+    fn build_transfer_to(
+        &self,
+        from_seed: u64,
+        amount: u64,
+        to_addr: Address,
+    ) -> Result<Transaction, NodeError> {
         if amount == 0 {
             return Err(NodeError::ZeroAmount);
         }
         let from = KeyPair::from_u64(from_seed);
-        let from_addr = from.address();
-        let to_addr = Self::address(to_seed);
+        let unsigned = self.prepare_transfer(from.address(), amount, to_addr)?;
+        let mut tx = unsigned.tx;
+        let sig = Sig::from_bytes(from.sign(&unsigned.sighash));
+        tx.attach_signature(0, sig);
+        Ok(tx)
+    }
 
+    /// Select one covering UTXO for `from` and build an **unsigned** transfer.
+    /// The wallet signs `sighash` and submits via [`submit_signed`](Self::submit_signed).
+    pub fn prepare_transfer(
+        &self,
+        from: Address,
+        amount: u64,
+        to: Address,
+    ) -> Result<Prepared, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        let fee = self.min_fee();
+        let need = amount.checked_add(fee).ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
-        // Best-fit: the smallest output of the sender that covers `amount`, with a
-        // deterministic tie-break on the outpoint so selection is reproducible.
         let mut candidates: Vec<(OutPoint, u64)> = state
             .iter()
-            .filter(|(_, out)| out.owner == from_addr && out.value >= amount)
+            .filter(|(_, out)| out.owner == from && out.value >= need)
             .map(|(op, out)| (*op, out.value))
             .collect();
         candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
         let (outpoint, value) = *candidates.first().ok_or(NodeError::InsufficientFunds)?;
-
-        let mut outputs = vec![TxOutput::new(amount, to_addr)];
-        if value > amount {
-            outputs.push(TxOutput::new(value - amount, from_addr));
+        let mut outputs = vec![TxOutput::new(amount, to)];
+        let change = value - need;
+        if change > 0 {
+            outputs.push(TxOutput::new(change, from));
         }
-        Ok(Transaction::signed(
-            &[(outpoint, &from)],
-            outputs,
-            Vec::new(),
-        ))
+        let tx = Transaction::unsigned(&[outpoint], outputs, Vec::new());
+        let sighash = tx.sighash();
+        Ok(Prepared {
+            tx,
+            sighash,
+            outpoint,
+            value,
+            fee,
+        })
     }
 
-    /// Send `amount` from actor `from_seed` to actor `to_seed` **immediately**,
-    /// as a new block built on the current tips. (For the mempool flow use
-    /// [`Node::pool`] then [`Node::produce_block`].)
-    pub fn send(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<Sent, NodeError> {
-        let tx = self.build_transfer(from_seed, amount, to_seed)?;
+    /// Attach `signature` to a prepared transfer, verify it against `from`, and
+    /// put the tx in the mempool. The secret key never enters the node.
+    pub fn submit_signed(
+        &mut self,
+        from: Address,
+        amount: u64,
+        to: Address,
+        signature: [u8; 64],
+    ) -> Result<TxId, NodeError> {
+        let prepared = self.prepare_transfer(from, amount, to)?;
+        if !verify(&from, &prepared.sighash, &signature) {
+            return Err(NodeError::BadSignature);
+        }
+        let mut tx = prepared.tx;
+        tx.attach_signature(0, Sig::from_bytes(signature));
+        self.submit_tx(tx)
+    }
+
+    /// Unspent outputs owned by `owner`.
+    pub fn utxos_of(&self, owner: &Address) -> Result<Vec<(OutPoint, u64)>, NodeError> {
+        let mut rows: Vec<(OutPoint, u64)> = self
+            .ledger()?
+            .ledger_state()
+            .iter()
+            .filter(|(_, o)| &o.owner == owner)
+            .map(|(op, o)| (*op, o.value))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows)
+    }
+
+    /// Send from a seed actor to an arbitrary address (faucet / demo).
+    pub fn send_to(
+        &mut self,
+        from_seed: u64,
+        amount: u64,
+        to: Address,
+    ) -> Result<Sent, NodeError> {
+        let tx = self.build_transfer_to(from_seed, amount, to)?;
         let tx_id = tx.id();
-        // Compute parents / timestamp / work / nonce while holding the shared
-        // borrow (the wall-clock timestamp needs `&self`, and mining needs the
-        // DAG's PoW switch), before the `&mut` insert.
         let parents = self.ledger()?.dag().tips();
         let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
@@ -329,6 +463,13 @@ impl Node {
             .map_err(NodeError::Insert)?;
         self.evict_mempool();
         Ok(Sent { block, tx: tx_id })
+    }
+
+    /// Send `amount` from actor `from_seed` to actor `to_seed` **immediately**,
+    /// as a new block built on the current tips. (For the mempool flow use
+    /// [`Node::pool`] then [`Node::produce_block`].)
+    pub fn send(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<Sent, NodeError> {
+        self.send_to(from_seed, amount, Self::address(to_seed))
     }
 
     /// Build a transfer and add it to the mempool (not yet in a block). Returns
@@ -367,15 +508,13 @@ impl Node {
             return Ok(None);
         }
 
-        let (subsidy, mut working) = {
+        let (subsidy, mut working, original) = {
             let ledger = self.ledger.as_ref().expect("checked above");
-            (ledger.subsidy(), ledger.ledger_state())
+            (ledger.subsidy(), ledger.ledger_state(), ledger.ledger_state())
         };
         let mut selected = Vec::new();
         let mut selected_ids = Vec::new();
         for tx in self.mempool.ordered() {
-            // Apply each candidate on top of the ones already chosen; keep it only
-            // if it holds, so the assembled block validates as a whole.
             if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
                 selected_ids.push(tx.id());
                 selected.push(tx);
@@ -384,22 +523,55 @@ impl Node {
         if selected.is_empty() {
             return Ok(None);
         }
+        let fees: u64 = selected.iter().map(|tx| fee_of(&original, tx)).sum();
 
-        // Compute parents / timestamp / work / nonce under a shared borrow (the
-        // wall-clock timestamp needs `&self`, and mining needs the DAG's PoW
-        // switch) before taking the `&mut` insert.
         let dag = self.ledger.as_ref().expect("checked above").dag();
         let parents = dag.tips();
         let timestamp = self.next_timestamp(dag, &parents);
         let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &selected);
+        let mut block_txs = self.issuance_txs(timestamp, fees);
+        block_txs.extend(selected);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &block_txs);
         let ledger = self.ledger.as_mut().expect("checked above");
         let block = ledger
-            .insert(parents, work, timestamp, nonce, &selected)
+            .insert(parents, work, timestamp, nonce, &block_txs)
             .map_err(NodeError::Insert)?;
         self.mempool.remove_all(&selected_ids);
         self.evict_mempool();
         Ok(Some(block))
+    }
+
+    /// Insert a block with no user transactions. If subsidy > 0, mints that many
+    /// KVNC to the miner via coinbase — this is how supply grows after genesis.
+    pub fn produce_empty(&mut self) -> Result<BlockId, NodeError> {
+        let parents = self.ledger()?.dag().tips();
+        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+        let dag = self.ledger()?.dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let txs = self.issuance_txs(timestamp, 0);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &txs);
+        let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
+        let id = ledger
+            .insert(parents, work, timestamp, nonce, &txs)
+            .map_err(NodeError::Insert)?;
+        self.evict_mempool();
+        Ok(id)
+    }
+
+    /// Coinbase claiming subsidy + `extra_fees` for `miner`. Empty if nothing to mint.
+    fn issuance_txs(&self, timestamp_ms: u64, extra_fees: u64) -> Vec<Transaction> {
+        let Some(miner) = self.miner else {
+            return Vec::new();
+        };
+        let subsidy = self.issuance().unwrap_or(0);
+        let total = subsidy.saturating_add(extra_fees);
+        if total == 0 {
+            return Vec::new();
+        }
+        vec![Transaction::coinbase(
+            vec![TxOutput::new(total, miner)],
+            timestamp_ms.to_le_bytes().to_vec(),
+        )]
     }
 
     /// A pending mempool transaction by id, if present.
@@ -508,6 +680,7 @@ impl Node {
                 ledger: Some(ledger),
                 mempool: Mempool::new(),
                 clock: Clock::default(),
+                miner: None,
             },
             store,
         ))
@@ -525,4 +698,15 @@ impl Node {
             .append(block)
             .map_err(|e| NodeError::Io(e.to_string()))
     }
+}
+
+fn fee_of(state: &UtxoSet, tx: &Transaction) -> u64 {
+    let mut sum_in = 0u64;
+    for input in tx.inputs() {
+        if let Some(prev) = state.get(&input.outpoint) {
+            sum_in = sum_in.saturating_add(prev.value);
+        }
+    }
+    let sum_out: u64 = tx.outputs().iter().map(|o| o.value).sum();
+    sum_in.saturating_sub(sum_out)
 }

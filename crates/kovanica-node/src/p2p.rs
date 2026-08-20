@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use kovanica_dag::{Block, BlockId};
-use kovanica_state::{encode_block_payload, Transaction, TxId};
+use kovanica_state::{encode_block_payload, Address, Transaction, TxId};
 
 use crate::node::{BlockRecord, Node, NodeError};
 
@@ -127,6 +127,21 @@ impl Mesh {
         self.seen_txs.entry(name).or_default();
     }
 
+    /// Registered node names, sorted.
+    pub fn names(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
+    }
+
+    /// Discrete mesh time.
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// Envelopes waiting to be delivered.
+    pub fn queued(&self) -> usize {
+        self.queue.len()
+    }
+
     /// Borrow a node by name.
     pub fn node(&self, name: &str) -> Option<&Node> {
         self.nodes.get(name)
@@ -216,6 +231,20 @@ impl Mesh {
         Ok(id)
     }
 
+    /// Produce an empty block on `name` and announce it.
+    pub fn produce_empty(&mut self, name: &str) -> Result<BlockId, P2pError> {
+        self.require(name)?;
+        let id = self
+            .nodes
+            .get_mut(name)
+            .expect("checked")
+            .produce_empty()?;
+        if let Some(rec) = self.nodes.get(name).and_then(|n| n.block_record(&id)) {
+            self.announce_block(name, rec);
+        }
+        Ok(id)
+    }
+
     /// Immediate send on `name`, then announce the new block.
     pub fn send(
         &mut self,
@@ -258,6 +287,51 @@ impl Mesh {
             self.announce_tx(name, tx);
         }
         Ok(id)
+    }
+
+    /// Wallet-signed spend into `name`'s mempool, then announce the tx.
+    pub fn submit_signed(
+        &mut self,
+        name: &str,
+        from: Address,
+        amount: u64,
+        to: Address,
+        signature: [u8; 64],
+    ) -> Result<TxId, P2pError> {
+        self.require(name)?;
+        let id = self
+            .nodes
+            .get_mut(name)
+            .expect("checked")
+            .submit_signed(from, amount, to, signature)?;
+        if let Some(tx) = self.nodes.get(name).and_then(|n| n.mempool_tx(&id)) {
+            self.announce_tx(name, tx);
+        }
+        Ok(id)
+    }
+
+    /// Seed actor pays an arbitrary address (explorer faucet) and announces.
+    pub fn send_to(
+        &mut self,
+        name: &str,
+        from_seed: u64,
+        amount: u64,
+        to: Address,
+    ) -> Result<BlockId, P2pError> {
+        self.require(name)?;
+        let sent = self
+            .nodes
+            .get_mut(name)
+            .expect("checked")
+            .send_to(from_seed, amount, to)?;
+        if let Some(rec) = self
+            .nodes
+            .get(name)
+            .and_then(|n| n.block_record(&sent.block))
+        {
+            self.announce_block(name, rec);
+        }
+        Ok(sent.block)
     }
 
     /// Delivered events, oldest first.

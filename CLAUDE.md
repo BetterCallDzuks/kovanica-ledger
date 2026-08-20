@@ -112,7 +112,8 @@ crates/
       net.rs                   gossip() (in-process) + serve_blocks/pull_blocks (one-shot TCP sync)
       p2p.rs                   Mesh: peer discovery (hello), delayed relay loop, block+tx flood
       relay.rs                 RelaySession: long-lived TCP framing of hello/block/tx
-      rpc.rs                   execute_line(): the text command protocol (string in, string out)
+      explorer.rs              self-hosted explorer: JSON API + static UI over Mesh
+      explorer.html            UI served by `kovanica-node explorer`
       main.rs                  Binary: `serve` (stdin/stdout REPL) and `demo` (scripted scenario)
     tests/
       rpc.rs                   Integration: end-to-end transfers, errors, snapshot round-trip via RPC
