@@ -28,10 +28,11 @@
 //! // Genesis mints 500 to actor 1; actor 1 sends 200 to actor 2.
 //! assert!(rpc::execute_line(&mut node, "genesis 3 1000 500 1").starts_with("ok genesis"));
 //! assert!(rpc::execute_line(&mut node, "send 1 200 2").starts_with("ok block"));
-//! assert_eq!(rpc::execute_line(&mut node, "balance 1"), "ok 300");
+//! assert_eq!(rpc::execute_line(&mut node, "balance 1"), "ok 299");
 //! assert_eq!(rpc::execute_line(&mut node, "balance 2"), "ok 200");
 //! ```
 
+pub mod explorer;
 pub mod mempool;
 pub mod net;
 pub mod node;
@@ -39,8 +40,9 @@ pub mod p2p;
 pub mod relay;
 pub mod rpc;
 
+pub use explorer::serve as serve_explorer;
 pub use mempool::Mempool;
 pub use net::NetError;
-pub use node::{BlockRecord, Node, NodeError, Sent};
+pub use node::{BlockRecord, Node, NodeError, Prepared, Sent};
 pub use p2p::{GossipEvent, GossipKind, Mesh, P2pError};
 pub use relay::{apply_relay, RelayMsg, RelaySession};

@@ -4,6 +4,9 @@
 //!   line from stdin, print the response to stdout. `quit`/`exit` ends it.
 //! * `kovanica-node demo` — replay a scripted end-to-end scenario, printing each
 //!   command and its response, so the whole stack can be exercised in one run.
+//! * `kovanica-node explorer [addr]` — self-hosted BlockDAG explorer (JSON API +
+//!   UI) on `addr`, default `0.0.0.0:8080`. The engine is this process; the
+//!   page only renders it.
 
 use std::io::{self, BufRead, Write};
 
@@ -14,15 +17,30 @@ fn main() {
     match mode.as_deref() {
         None | Some("serve") => serve(),
         Some("demo") => demo(),
+        Some("explorer") => {
+            let addr = std::env::args()
+                .nth(2)
+                .unwrap_or_else(|| "0.0.0.0:8080".into());
+            if let Err(e) = kovanica_node::serve_explorer(&addr) {
+                eprintln!("explorer failed: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("help") | Some("-h") | Some("--help") => {
-            println!("usage: kovanica-node [serve|demo]");
-            println!("  serve  read commands from stdin (default)");
-            println!("  demo   run a scripted end-to-end scenario");
+            println!("usage: kovanica-node [serve|demo|explorer [addr]]");
+            println!("  serve     read commands from stdin (default)");
+            println!("  demo      run a scripted end-to-end scenario");
+            println!("  explorer  self-hosted UI + JSON API (default 0.0.0.0:8080)");
+            println!("            env: KOVANICA_DATA  KOVANICA_MINE=0|1  KOVANICA_FAUCET=0|1");
+            println!("                 KOVANICA_ALLOW_RESET=0|1  KOVANICA_OPERATOR=0|1");
+            println!("                 KOVANICA_LISTEN=0.0.0.0:9000");
+            println!("                 KOVANICA_PEERS=host:9000,host2:9000");
+            println!("                 KOVANICA_POW=0|1  (default 1, consensus hash target)");
             println!();
             println!("{}", rpc::HELP);
         }
         Some(other) => {
-            eprintln!("unknown mode '{other}' (use: serve | demo | help)");
+            eprintln!("unknown mode '{other}' (use: serve | demo | explorer | help)");
             std::process::exit(2);
         }
     }
