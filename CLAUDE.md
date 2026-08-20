@@ -8,7 +8,8 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > with ed25519 spend authorisation, per-block state, snapshot persistence, and
 > finality-depth pruning / re-orgs (`crates/kovanica-state`); and a runnable node
 > binary with a line RPC, a
-> mempool, block production, and multi-node block gossip (`crates/kovanica-node`).
+> mempool, block production, multi-node block gossip, and geographic origin
+> tracking (`crates/kovanica-node`).
 > **Proof-of-work is real and opt-in**: blocks carry a `nonce`, and
 > `Dag::set_proof_of_work(true)` makes `Dag::insert` require each block's id to
 > meet its `work` target (Nakamoto-style `H * work < 2^256`, so `work` = expected
@@ -19,7 +20,9 @@ Guidance for AI assistants (and humans) working in the **kovanica-ledger** repos
 > block must actually be mined to that work. Separately, the
 > **node** now enforces a wall-clock future-time bound on block timestamps
 > (`Node::receive_block` rejects a block dated more than two hours ahead of the
-> local clock) — deliberately node policy, not a pure function of the DAG. Still
+> local clock) and may declare an ISO 3166-1 alpha-3 origin so operators can
+> track where users come from — both deliberately **node policy**, not a pure
+> function of the DAG. Still
 > **TODO** (below): continuous p2p gossip with peer discovery.
 > Keep this file in sync with the code: update it in the same change that adds or
 > moves the structure it describes.
@@ -104,9 +107,10 @@ crates/
   kovanica-node/               Runnable node binary, mempool, and block gossip (third slice + multi-node)
     src/
       lib.rs                   Crate docs + re-exports + a doctest of the RPC
-      node.rs                  Node: Ledger + Mempool; genesis/send/pool/produce/balance/tips/save/load + gossip
+      node.rs                  Node: Ledger + Mempool + Origin; genesis/send/pool/produce/balance/tips/save/load + gossip
+      origin.rs                Origin: ISO 3166-1 alpha-3 (node policy, not consensus)
       mempool.rs               Mempool: pending txs, deterministic (id) ordering for block assembly
-      net.rs                   gossip() (in-process) + serve_blocks/pull_blocks (one-shot TCP sync)
+      net.rs                   gossip() (in-process, records origin pulses) + serve_blocks/pull_blocks (one-shot TCP sync)
       rpc.rs                   execute_line(): the text command protocol (string in, string out)
       main.rs                  Binary: `serve` (stdin/stdout REPL) and `demo` (scripted scenario)
     tests/
@@ -114,6 +118,7 @@ crates/
       mempool.rs               Integration: pool/produce assembly, conflict partial-inclusion
       network.rs               Integration: multi-node convergence (in-process + conflict + TCP loopback)
       timestamps.rs            Integration: wall-clock timestamp policy (pinned clock, monotone stamps, far-future reject)
+      origins.rs               Integration: origin RPC, gossip pulses, consensus unchanged, TCP wire untouched
 ```
 
 Not built yet (**TODO**, add crates under `crates/` as they land): continuous p2p
@@ -210,6 +215,11 @@ gossip with peer discovery — `kovanica-node` today does one-shot block sync
   `MAX_FUTURE_DRIFT_MS` = 2h); the node's clock is injectable (`Node::set_now_ms`)
   so production timestamps and the bound are deterministic in tests, and produced
   blocks now stamp wall-clock now clamped monotone above their parents.
+  Geographic origin is the same kind of node policy: a node may declare an ISO
+  3166-1 alpha-3 [`Origin`] (`Node::set_origin`); in-process `net::gossip`
+  records a pulse on the receiver (`Node::observe_origin`). Origin never enters a
+  block's canonical encoding, never affects GHOSTDAG, and the TCP one-shot block
+  sync leaves the wire format unchanged. RPC: `origin [ISO3]` / `origins`.
 
 ## 4. Build, test & run
 
@@ -317,6 +327,12 @@ is a library plus a binary (`serve`/`demo`).
       injectable (`Node::set_now_ms`) for deterministic tests; produced blocks
       stamp wall-clock now clamped monotone above their parents
       (`crates/kovanica-node/tests/timestamps.rs`).
+- [x] Geographic origin tracking (**node policy**, not consensus): a node may
+      declare an ISO 3166-1 alpha-3 `Origin` (`Node::set_origin`). In-process
+      `net::gossip` records a pulse from the sender so operators can see where
+      users come from. Origin never enters a block's encoding or GHOSTDAG; the
+      TCP one-shot block-record wire is unchanged. RPC: `origin [ISO3]` /
+      `origins` (`crates/kovanica-node/src/origin.rs`, `tests/origins.rs`).
 - [x] Real proof-of-work (`kovanica-dag::pow`): `Block` carries a `nonce`, and
       `pow::meets_target` is the Nakamoto hash-target rule (`H * work < 2^256`,
       dependency-free 256×128 limb arithmetic), so `work` = expected hashes and

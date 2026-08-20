@@ -58,6 +58,7 @@ fn demo() {
     let mut node = Node::new();
     let script = [
         "genesis 3 1000 500 1", // actor 1 is funded with 500
+        "origin HRV",           // declare this node's country (node policy)
         "balance 1",
         "send 1 200 2", // immediate block: 1 -> 2 (200), change 300 back to 1
         "balance 1",
@@ -68,6 +69,7 @@ fn demo() {
         "pending",
         "balance 2",
         "balance 3",
+        "origins", // observed peer pulses (empty until gossip)
         "tip",
         "len",
     ];

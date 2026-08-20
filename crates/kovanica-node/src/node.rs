@@ -1,6 +1,11 @@
 //! The node: an in-memory [`Ledger`] and [`Mempool`], plus the operations a node
 //! offers — bring up a genesis, build/pack/submit spends, produce blocks, gossip
-//! blocks with peers, query balances and tips, and save/load its state.
+//! blocks with peers, query balances and tips, save/load its state, and declare
+//! a geographic [`Origin`] so operators can track where users come from.
+//!
+//! Origin is **node policy**, not consensus: it never enters a block's encoding
+//! and never affects GHOSTDAG. Observed pulses are a local view, recorded when a
+//! peer announces itself (in-process [`crate::net::gossip`] today).
 //!
 //! For demonstration and testing, actors are identified by a small integer
 //! *seed* — the node derives `KeyPair::from_u64(seed)` for them and signs on
@@ -9,6 +14,7 @@
 //! keys or does wallet work; that lives client-side. This keeps the binary a
 //! runnable, self-contained demo of the whole stack.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +25,7 @@ use kovanica_state::{
 };
 
 use crate::mempool::Mempool;
+use crate::origin::Origin;
 
 /// How far ahead of the local wall clock a received block's timestamp may sit
 /// before the node rejects it: two hours, in milliseconds. This is **node
@@ -125,6 +132,10 @@ pub struct Node {
     ledger: Option<Ledger>,
     mempool: Mempool,
     clock: Clock,
+    /// This node's self-declared origin. Node policy — not consensus.
+    origin: Option<Origin>,
+    /// Pulse counts of origins announced by peers (and never by consensus).
+    observed: BTreeMap<Origin, u64>,
 }
 
 impl Node {
@@ -152,6 +163,32 @@ impl Node {
     /// a real node runs on the default wall clock.
     pub fn set_now_ms(&mut self, now_ms: u64) {
         self.clock = Clock::Fixed(now_ms);
+    }
+
+    /// Set this node's geographic origin (ISO 3166-1 alpha-3). Node policy —
+    /// does not enter the DAG or change GHOSTDAG. Replaces any previous value.
+    pub fn set_origin(&mut self, origin: Origin) {
+        self.origin = Some(origin);
+    }
+
+    /// This node's self-declared origin, if set.
+    pub fn origin(&self) -> Option<Origin> {
+        self.origin
+    }
+
+    /// Record one pulse from a peer that announced `origin`. Called by
+    /// [`crate::net::gossip`] when the sender has an origin. Idempotent in the
+    /// sense that repeated gossip from the same origin just increments.
+    pub fn observe_origin(&mut self, origin: Origin) {
+        *self.observed.entry(origin).or_insert(0) += 1;
+    }
+
+    /// Observed origin pulses, highest count first, ISO-3 tie-break. Does not
+    /// include this node's own origin unless a peer has also announced it.
+    pub fn origin_pulses(&self) -> Vec<(Origin, u64)> {
+        let mut rows: Vec<(Origin, u64)> = self.observed.iter().map(|(o, n)| (*o, *n)).collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        rows
     }
 
     /// The timestamp to stamp on a new block built on `parents`: the node's
