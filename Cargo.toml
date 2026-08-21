@@ -12,5 +12,9 @@ rust-version = "1.75"
 [workspace.dependencies]
 blake3 = "1"
 hex = "0.4"
-# Ed25519 spend authorisation. Pinned to 2.x to stay within the workspace MSRV.
 ed25519-dalek = "2"
+libp2p = { version = "0.53", features = ["tokio", "tcp", "noise", "yamux", "gossipsub", "mdns", "macros"] }
+tokio = { version = "1.30", features = ["full"] }
+futures = "0.3"
+
+
